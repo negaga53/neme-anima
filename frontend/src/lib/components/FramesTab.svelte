@@ -83,17 +83,6 @@
     }
   }
 
-  async function refreshFramesAfterCrop() {
-    const slug = projectsStore.active?.slug;
-    if (slug) {
-      await framesStore.refresh(slug, {
-        source: viewStore.sourceFilter ?? undefined,
-        query: viewStore.tagQuery || undefined,
-        characterSlug: filterToQuery(viewStore.characterFilter),
-      });
-    }
-  }
-
   // ---------------- drag-and-drop image import ----------------
 
   function isImageDrag(ev: DragEvent): boolean {
@@ -252,10 +241,11 @@
     onclose={() => (previewIndex = null)}
     ondelete={deletePreviewFrame}
     oncropped={(filename) => {
-      // Bump first (survives the refresh's states reset) so the grid tile
-      // re-fetches the freshly-written crop derivative.
+      // Patch the one row in place (flip has_crop + bump the cache-bust
+      // counter) so the tile swaps in the crop derivative. Deliberately NOT a
+      // full framesStore.refresh(): that toggles `loading`, which empties the
+      // grid DOM and scrolls the page to the top behind the still-open modal.
       framesStore.markCropped(filename);
-      void refreshFramesAfterCrop();
     }}
   />
 {/if}

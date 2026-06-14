@@ -81,10 +81,21 @@ class FramesStore {
     }
   }
 
-  /** Bump a frame's crop counter so the grid re-fetches its crop derivative.
-   *  Per-key immutable mutation (like the `states` map) keeps the reactivity
-   *  scoped to the one tile whose crop changed. */
+  /** Record that a crop derivative was just written for a frame.
+   *
+   *  Flips `has_crop` on the row in place (immutable per-item replacement, like
+   *  markRetagged) so the grid swaps in the crop derivative without a full list
+   *  refetch — a refetch toggles `loading`, which empties the grid DOM and
+   *  scrolls the page to the top while the modal is still open. Also bumps the
+   *  per-filename crop counter so the `?v=N` cache-bust shows the new pixels
+   *  after a re-crop (which overwrites `<name>_crop.png` at the same URL). Both
+   *  mutations are per-key/per-item so reactivity stays scoped to the one tile
+   *  whose crop changed. */
   markCropped(filename: string) {
+    const idx = this.items.findIndex((i) => i.filename === filename);
+    if (idx >= 0 && !this.items[idx].has_crop) {
+      this.items[idx] = { ...this.items[idx], has_crop: true };
+    }
     this.cropVersions.set(filename, (this.cropVersions.get(filename) ?? 0) + 1);
   }
 
