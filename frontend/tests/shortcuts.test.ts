@@ -12,7 +12,7 @@ function ev(key: string, mods: Partial<KeyboardEvent> = {}) {
 describe("matchShortcut", () => {
   it("matches the plain frames keys", () => {
     expect(matchShortcut(ev("a"))?.action).toBe("select-all");
-    expect(matchShortcut(ev("d"))?.action).toBe("clear-selection");
+    expect(matchShortcut(ev("d"))?.action).toBe("delete-selection");
     expect(matchShortcut(ev("Escape"))?.action).toBe("clear-selection");
     expect(matchShortcut(ev("t"))?.action).toBe("bulk-tag");
     expect(matchShortcut(ev("s"))?.action).toBe("bulk-describe");
@@ -43,11 +43,11 @@ describe("matchShortcut", () => {
     expect(others.every((s: Shortcut) => !s.global)).toBe(true);
   });
 
-  it("Escape is the only shortcut sharing an action with another key", () => {
-    // d and Escape both clear; everything else is 1:1.
-    const clears = defaultShortcuts.filter(
-      (s) => s.action === "clear-selection",
-    );
-    expect(clears.map((s) => s.key).sort()).toEqual(["Escape", "d"]);
+  it("binds every action to exactly one key", () => {
+    // After D was repurposed to delete-selection, clear-selection is reachable
+    // only via Escape — every action is now 1:1 with a key.
+    const actions = defaultShortcuts.map((s) => s.action);
+    expect(new Set(actions).size).toBe(actions.length);
+    expect(matchShortcut(ev("d"))?.action).toBe("delete-selection");
   });
 });

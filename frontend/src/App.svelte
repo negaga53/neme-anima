@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
+  import * as api from "$lib/api";
   import { projectsStore } from "$lib/stores/projects.svelte";
   import { viewStore } from "$lib/stores/view.svelte";
   import { queueStore } from "$lib/stores/queue.svelte";
@@ -109,6 +110,9 @@
       case "clear-selection":
         framesStore.clear();
         break;
+      case "delete-selection":
+        if (framesStore.selectedFilenames().length > 0) void deleteSelection();
+        break;
       case "bulk-tag":
         if (framesStore.selectedFilenames().length > 0) bulkTagSelection();
         break;
@@ -123,6 +127,19 @@
         break;
     }
     ev.preventDefault();
+  }
+
+  // Mirrors ActionBar's Delete button: native confirm, bulk-delete, then drop
+  // the rows locally. Kept here (not delegated to ActionBar) so the keyboard
+  // path matches the other shortcut handlers in this file.
+  async function deleteSelection() {
+    const slug = projectsStore.active?.slug;
+    if (!slug) return;
+    const filenames = framesStore.selectedFilenames();
+    if (filenames.length === 0) return;
+    if (!confirm(`Delete ${filenames.length} frame${filenames.length === 1 ? "" : "s"}?`)) return;
+    await api.bulkDeleteFrames(slug, filenames);
+    framesStore.removeLocal(filenames);
   }
 
   async function bulkTagSelection() {

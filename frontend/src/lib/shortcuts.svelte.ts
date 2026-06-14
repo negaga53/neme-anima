@@ -6,6 +6,7 @@
 export type ShortcutAction =
   | "select-all"
   | "clear-selection"
+  | "delete-selection"
   | "bulk-tag"
   | "bulk-describe"
   | "open-regex"
@@ -22,7 +23,7 @@ export type Shortcut = {
 
 export const defaultShortcuts: Shortcut[] = [
   { key: "a", label: "A", description: "Select all frames", action: "select-all" },
-  { key: "d", label: "D", description: "Clear selection", action: "clear-selection" },
+  { key: "d", label: "D", description: "Delete selection", action: "delete-selection" },
   { key: "Escape", label: "Esc", description: "Clear selection", action: "clear-selection" },
   { key: "t", label: "T", description: "Tag selected frames (WD14)", action: "bulk-tag" },
   { key: "s", label: "S", description: "Describe selected frames (LLM)", action: "bulk-describe" },
