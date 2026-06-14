@@ -406,7 +406,7 @@ async def bulk_retag_danbooru(
     import numpy as np
     from PIL import Image
 
-    tagger = _get_or_make_tagger(request)
+    tagger = _get_or_make_tagger(request, project)
 
     def _tag_one(filename: str) -> tuple[bool, str | None]:
         # Prefer the cropped derivative when one exists for an original.
@@ -795,15 +795,44 @@ async def crop_frame_endpoint(
     return _record_to_dict(new_rec, project)
 
 
-def _get_or_make_tagger(request: Request):
-    """Cache a single Tagger instance on app.state — WD14 model load is slow."""
-    cached = getattr(request.app.state, "_tagger", None)
-    if cached is not None:
-        return cached
+def _effective_tag_config(project: Project):
+    """Merge the project's ``tag`` overrides over the ``TagConfig`` defaults.
+
+    Mirrors ``pipeline._resolve_thresholds`` for the ``tag`` section — including
+    coercing the JSON-deserialized ``exclude_tags`` list back to a tuple — but
+    without importing the GPU-heavy pipeline module (``projects.py`` plays the
+    same trick for thresholds).
+    """
+    from neme_anima.config import TagConfig
+
+    cfg = TagConfig()
+    tag_overrides = (project.thresholds_overrides or {}).get("tag", {})
+    for k, v in tag_overrides.items():
+        if not hasattr(cfg, k):
+            continue
+        if k == "exclude_tags":
+            v = tuple(v)
+        setattr(cfg, k, v)
+    return cfg
+
+
+def _get_or_make_tagger(request: Request, project: Project | None = None):
+    """Return a WD14 ``Tagger`` configured with the project's effective TagConfig.
+
+    Tests (and any future preload) inject ``app.state._tagger`` directly; honor
+    it verbatim. Otherwise build the Tagger from the project's ``tag`` overrides
+    so the per-project blacklist (``tag.exclude_tags``) is actually applied on
+    re-tag — exactly as the pipeline does via ``Tagger(thresholds.tag)``. The
+    WD14 model itself is lru-cached inside imgutils by ``model_name``, so the
+    lightweight wrapper is cheap to rebuild per request; that also means editing
+    the blacklist or switching projects can never serve a stale exclude list.
+    """
+    injected = getattr(request.app.state, "_tagger", None)
+    if injected is not None:
+        return injected
     from neme_anima.tag import Tagger
-    cached = Tagger()
-    request.app.state._tagger = cached
-    return cached
+    cfg = _effective_tag_config(project) if project is not None else None
+    return Tagger(cfg)
 
 
 def _process_uploaded_image(
@@ -964,7 +993,7 @@ async def upload_frames(
     # auth, wrong model name) and the rest are echoes.
     llm_error: str | None = None
 
-    tagger = _get_or_make_tagger(request)
+    tagger = _get_or_make_tagger(request, project)
 
     for f in files:
         try:

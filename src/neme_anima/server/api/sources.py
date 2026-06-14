@@ -408,7 +408,7 @@ async def capture_frame(
             ) from e
         data = tmp_png.read_bytes()
 
-    tagger = _get_or_make_tagger(request)
+    tagger = _get_or_make_tagger(request, project)
     rec_dict, llm_error = await ingest_kept_image(
         project,
         data=data,

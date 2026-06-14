@@ -526,6 +526,49 @@ async def test_bulk_retag_danbooru_uses_original_when_no_crop(
     assert txt.startswith("wd14_only\n")
 
 
+def test_tagger_applies_project_blacklist(app, project_with_frames: Project):
+    """The WD14 retag path must honor the project's tag blacklist.
+
+    The blacklist is persisted as ``thresholds_overrides["tag"]["exclude_tags"]``
+    (Settings → Workflow). The pipeline applies it by building
+    ``Tagger(thresholds.tag)``; the server's re-tag path must feed the same
+    effective config into its Tagger, otherwise blacklisted tags are never
+    stripped on re-tag — the bug this guards against.
+    """
+    from types import SimpleNamespace
+
+    from neme_anima.server.api.frames import _get_or_make_tagger
+
+    project_with_frames.thresholds_overrides = {
+        "tag": {"exclude_tags": ["solo", "simple background"]}
+    }
+    # No injected app.state._tagger → the real Tagger is built from config.
+    tagger = _get_or_make_tagger(SimpleNamespace(app=app), project_with_frames)
+
+    assert tuple(tagger.cfg.exclude_tags) == ("solo", "simple background")
+    # The pure composition path proves the exclusion actually fires; no GPU.
+    text = tagger._compose_text(
+        general={"1girl": 0.9, "solo": 0.8, "simple background": 0.7},
+        character={},
+    )
+    tags = [t for t in text.split(", ") if t]
+    assert "1girl" in tags
+    assert "solo" not in tags
+    assert "simple background" not in tags
+
+
+def test_tagger_honors_injected_tagger(app, project_with_frames: Project):
+    """A test/preload-injected ``app.state._tagger`` is returned verbatim so the
+    GPU-bypass seam other tests rely on keeps working."""
+    from types import SimpleNamespace
+
+    from neme_anima.server.api.frames import _get_or_make_tagger
+
+    sentinel = object()
+    app.state._tagger = sentinel
+    assert _get_or_make_tagger(SimpleNamespace(app=app), project_with_frames) is sentinel
+
+
 async def test_bulk_retag_llm_prefers_crop_derivative(
     client, project_with_frames: Project, monkeypatch,
 ):
