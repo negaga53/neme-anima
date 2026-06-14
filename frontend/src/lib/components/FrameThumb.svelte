@@ -153,9 +153,20 @@
     return () => document.removeEventListener("keydown", onKeydown);
   });
 
-  let imageUrl = $derived(
-    projectsStore.active ? api.frameImageUrl(projectsStore.active.slug, frame.filename) : "",
-  );
+  // When the frame has a crop derivative, the grid shows the cropped pixels in
+  // place of the original (selection/sidecar still key off the original
+  // filename). `cropVersion` busts the browser cache after a re-crop, which
+  // overwrites `<name>_crop.png` at the same URL.
+  let imageUrl = $derived.by(() => {
+    const proj = projectsStore.active;
+    if (!proj) return "";
+    if (frame.has_crop) {
+      const v = framesStore.cropVersion(frame.filename);
+      const base = api.frameImageUrl(proj.slug, frame.filename + api.CROP_SUFFIX);
+      return v > 0 ? `${base}?v=${v}` : base;
+    }
+    return api.frameImageUrl(proj.slug, frame.filename);
+  });
 
   // Dedupe defensively — the server normalizes on write, but pre-existing
   // sidecars may still have duplicates and the keyed `{#each}` requires unique
@@ -240,7 +251,7 @@
          mouse button a beat too long on a thumb would otherwise start dragging
          a ghost of the image, which feels like an accidental move and can
          swallow the intended click. There's no drag-to-reorder feature here. -->
-    <img src={imageUrl} alt="" draggable="false" class="w-full h-full object-cover select-none" loading="lazy" />
+    <img src={imageUrl} alt="" draggable="false" class="w-full h-full select-none {viewStore.fitContain ? 'object-contain bg-black' : 'object-cover'}" loading="lazy" />
 
     {#if selected}
       <!-- Inset border overlay drawn on top of the image, with a faint tint

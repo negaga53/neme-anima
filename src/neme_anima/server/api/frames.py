@@ -138,12 +138,19 @@ async def list_frames(
     tokens = _parse_tag_query(query) if query else []
     items = []
     total_in_view = 0
+    # Count of on-disk kept frames (in the current source/kept view) whose
+    # slug isn't a current character — computed independently of the active
+    # character filter and tag query so the top bar can decide whether to
+    # surface the "Unsorted" chip at all.
+    unsorted_total = 0
     for rec in by_filename.values():
         on_disk = (
             kept_dir / f"{rec.filename}.png" if rec.kept else rejected_dir / f"{rec.filename}.png"
         )
         if not on_disk.is_file():
             continue
+        if rec.character_slug not in known_slugs:
+            unsorted_total += 1
         # Character-slug filter is applied here (after the on-disk check) so
         # the per-character total reflects what the user can actually see.
         # The "unsorted" sentinel matches any record whose slug isn't in the
@@ -174,11 +181,14 @@ async def list_frames(
             "ccip_distance": rec.ccip_distance,
             "score": rec.score,
             "character_slug": rec.character_slug,
+            # The grid swaps in the crop derivative's pixels when one exists.
+            "has_crop": (kept_dir / f"{rec.filename}{CROP_SUFFIX}.png").is_file(),
             **sidecar_flags,
         })
     return {
         "count": len(items),
         "total": total_in_view,
+        "unsorted_total": unsorted_total,
         "items": items[offset: offset + limit],
     }
 
@@ -641,6 +651,11 @@ def _record_to_dict(rec: FrameRecord, project: Project | None = None) -> dict:
         if project is not None
         else {"has_tags": False, "has_description": False}
     )
+    has_crop = (
+        (project.kept_dir / f"{rec.filename}{CROP_SUFFIX}.png").is_file()
+        if project is not None
+        else False
+    )
     return {
         "filename": rec.filename,
         "kept": rec.kept,
@@ -652,6 +667,7 @@ def _record_to_dict(rec: FrameRecord, project: Project | None = None) -> dict:
         "ccip_distance": rec.ccip_distance,
         "score": rec.score,
         "character_slug": rec.character_slug,
+        "has_crop": has_crop,
         **flags,
     }
 

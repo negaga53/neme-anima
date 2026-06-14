@@ -12,6 +12,10 @@ export type CharacterFilter = "all" | "unsorted" | string;
 class ViewStore {
   tab = $state<Tab>("frames");
   density = $state<number>(7); // columns in the frame grid (3-12)
+  // Grid thumbnail scaling. false = fill the 3:4 tile (object-cover, crops);
+  // true = fit the whole image inside the tile (object-contain, black bars,
+  // never cropped). In-memory only, matching `density`.
+  fitContain = $state<boolean>(false);
   sourceFilter = $state<string | null>(null);
   // Server-side tag filter for the frames grid. Whitespace-separated
   // substrings; tokens prefixed with `~` negate. Bound to the search input

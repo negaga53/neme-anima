@@ -18,7 +18,9 @@
     onnav: (next: number) => void;
     onclose: () => void;
     /** Called after a crop derivative has been saved server-side. */
-    oncropped: () => void;
+    /** Fired after a crop saves, with the cropped original's filename so the
+     *  grid can swap in / cache-bust the crop derivative. */
+    oncropped: (filename: string) => void;
   };
   const { filenames, index, onnav, onclose, oncropped }: Props = $props();
 
@@ -331,7 +333,7 @@
       initialX = cropX; initialY = cropY; initialW = cropW; initialH = cropH;
       modified = false;
       cropSavedFlash.trigger();
-      oncropped();
+      oncropped(filename);
     } catch (e) {
       console.error("crop failed", e);
       toasts.error("Crop failed — see console for details.");

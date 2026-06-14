@@ -89,6 +89,65 @@ async def test_list_filtered_by_source(client, project_with_frames: Project):
     assert body["items"][0]["filename"].startswith("ep02__")
 
 
+def _append_frame(project: Project, name: str, *, slug: str = "default") -> None:
+    """Drop a synthetic 16×16 kept frame on disk + a metadata row for it."""
+    img = np.zeros((16, 16, 3), dtype=np.uint8)
+    Image.fromarray(img).save(project.kept_dir / f"{name}.png")
+    (project.kept_dir / f"{name}.txt").write_text("1girl\n")
+    MetadataLog(project.metadata_path).append(FrameRecord(
+        filename=name, kept=True, scene_idx=0, tracklet_id=1, frame_idx=99,
+        timestamp_seconds=4.0, bbox=(0, 0, 16, 16), ccip_distance=0.1,
+        sharpness=10.0, visibility=1.0, aspect=0.95, score=0.9,
+        video_stem="ep01", character_slug=slug,
+    ))
+
+
+async def test_list_frames_unsorted_total_counts_orphans(
+    client, project_with_frames: Project,
+):
+    """`unsorted_total` counts kept frames whose slug isn't a current
+    character (orphans from a rename/delete) — independent of the active
+    character filter so the top bar can decide whether to show the chip."""
+    # The two fixture frames are slug 'default' (a real character); add one
+    # orphan whose slug is not in the project's character set.
+    _append_frame(project_with_frames, "ep01__s000_t001_f000099", slug="ghost")
+
+    resp = await client.get(f"/api/projects/{project_with_frames.slug}/frames")
+    assert resp.json()["unsorted_total"] == 1
+
+    # Filtering down to a real character must NOT zero the unsorted total.
+    resp = await client.get(
+        f"/api/projects/{project_with_frames.slug}/frames",
+        params={"character_slug": "default"},
+    )
+    assert resp.json()["unsorted_total"] == 1
+
+
+async def test_list_frames_has_crop_flag(
+    client, project_with_frames: Project,
+):
+    """`has_crop` flips true on the original once a crop derivative exists,
+    so the grid can show the cropped pixels in place of the original."""
+    name = "ep01__s000_t001_f000010"
+    # Before cropping, every row reports has_crop=False.
+    resp = await client.get(f"/api/projects/{project_with_frames.slug}/frames")
+    by_name = {f["filename"]: f for f in resp.json()["items"]}
+    assert by_name[name]["has_crop"] is False
+
+    # Crop needs a bigger source than the 16×16 fixture.
+    big = np.zeros((100, 200, 3), dtype=np.uint8)
+    Image.fromarray(big).save(project_with_frames.kept_dir / f"{name}.png")
+    resp = await client.post(
+        f"/api/projects/{project_with_frames.slug}/frames/{name}/crop",
+        json={"x": 10, "y": 20, "width": 80, "height": 60},
+    )
+    assert resp.status_code == 200
+
+    resp = await client.get(f"/api/projects/{project_with_frames.slug}/frames")
+    by_name = {f["filename"]: f for f in resp.json()["items"]}
+    assert by_name[name]["has_crop"] is True
+
+
 async def test_upload_frames_saves_and_tags(
     client, app, project_with_frames: Project,
 ):

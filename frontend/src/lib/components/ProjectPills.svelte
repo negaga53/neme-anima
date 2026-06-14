@@ -7,6 +7,24 @@
   type Props = { onopenCreate: () => void; onopenDelete: () => void };
   const { onopenCreate, onopenDelete }: Props = $props();
 
+  // Collapsed by default: show only the latest project. The registry returns
+  // the list ordered by `last_opened_at DESC`, so `list[0]` is the most
+  // recently opened. Expanding reveals every project; the chevron flips.
+  let expanded = $state(false);
+
+  let canToggle = $derived(projectsStore.list.length > 1);
+
+  // Collapsed view shows the active project (whichever is open), falling back
+  // to the most-recently-opened when nothing is loaded yet.
+  let displayList = $derived.by(() => {
+    const list = projectsStore.list;
+    if (expanded || list.length <= 1) return list;
+    const activeSlug = projectsStore.active?.slug;
+    const collapsed =
+      (activeSlug ? list.find((p) => p.slug === activeSlug) : undefined) ?? list[0];
+    return [collapsed];
+  });
+
   function isActive(slug: string): boolean {
     return projectsStore.active?.slug === slug;
   }
@@ -17,7 +35,7 @@
 </script>
 
 <div class="flex items-center gap-1">
-  {#each projectsStore.list as p (p.slug)}
+  {#each displayList as p (p.slug)}
     {@const active = isActive(p.slug)}
     <span
       class="inline-flex items-center rounded-full overflow-hidden
@@ -56,6 +74,17 @@
       {/if}
     </span>
   {/each}
+  {#if canToggle}
+    <button
+      type="button"
+      onclick={() => (expanded = !expanded)}
+      aria-expanded={expanded}
+      aria-label={expanded ? "Show only the latest project" : "Show all projects"}
+      title={expanded ? "Collapse to the latest project" : "Show all projects"}
+      class="w-6 py-1 text-xs rounded-full border border-ink-600 leading-none
+             text-slate-400 hover:border-accent-500 hover:text-accent-400"
+    >{expanded ? "‹" : "›"}</button>
+  {/if}
   <button
     class="w-6 py-1 text-xs rounded-full border border-dashed border-ink-600
            text-slate-500 hover:border-accent-500 hover:text-accent-400"

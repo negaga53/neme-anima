@@ -119,6 +119,10 @@ export interface FrameRecord {
   /** True when the .txt sidecar has a non-empty first line of danbooru tags.
    *  Used to warn before bulk re-tagging overwrites curated tag lines. */
   has_tags: boolean;
+  /** True when a crop derivative (`<name>_crop.png`) exists on disk. The grid
+   *  shows the cropped pixels in its place; selection/sidecar stay on the
+   *  original filename. */
+  has_crop: boolean;
 }
 
 export interface FramesPage {
@@ -127,6 +131,10 @@ export interface FramesPage {
   /** Count in the current source/kept_only view before the tag query is
    *  applied — drives the "X / total" badge when a search is active. */
   total: number;
+  /** On-disk kept frames in the current source view whose slug isn't a
+   *  current character — independent of the active character filter. Drives
+   *  whether the top bar shows the "Unsorted" chip. */
+  unsorted_total: number;
   items: FrameRecord[];
 }
 

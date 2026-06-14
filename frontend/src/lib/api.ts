@@ -12,6 +12,12 @@ import type {
  *  manually since changing it breaks the wire protocol either way. */
 export const UNSORTED_FILTER_SENTINEL = "__unsorted__";
 
+/** Suffix of a frame's crop derivative on disk (`<name>_crop.png`). Mirrors
+ *  ``CROP_SUFFIX`` in src/neme_anima/storage/project.py. The grid appends this
+ *  to a frame's filename to request the cropped pixels in place of the
+ *  original when ``FrameRecord.has_crop`` is set. */
+export const CROP_SUFFIX = "_crop";
+
 export class ApiError extends Error {
   constructor(public status: number, public detail: unknown) {
     super(`API ${status}: ${JSON.stringify(detail)}`);

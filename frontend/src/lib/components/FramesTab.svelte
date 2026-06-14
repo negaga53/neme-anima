@@ -224,6 +224,11 @@
     index={previewIndex}
     onnav={navPreview}
     onclose={() => (previewIndex = null)}
-    oncropped={() => { void refreshFramesAfterCrop(); }}
+    oncropped={(filename) => {
+      // Bump first (survives the refresh's states reset) so the grid tile
+      // re-fetches the freshly-written crop derivative.
+      framesStore.markCropped(filename);
+      void refreshFramesAfterCrop();
+    }}
   />
 {/if}

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { framesStore } from "$lib/stores/frames.svelte";
   import { projectsStore } from "$lib/stores/projects.svelte";
   import { viewStore } from "$lib/stores/view.svelte";
   import ActionBar from "./ActionBar.svelte";
@@ -29,11 +30,26 @@
   );
 
   /** Pseudo-chips in front of the real characters: "All" (no filter) and
-   *  "Unsorted" (server sentinel for orphan rows). */
-  const leadingChips = [
-    { key: "all", label: "All" },
-    { key: "unsorted", label: "Unsorted" },
-  ];
+   *  "Unsorted" (server sentinel for orphan rows). The "Unsorted" chip only
+   *  appears when the project actually has orphan frames — `unsortedTotal` is
+   *  refreshed on every grid fetch. */
+  let leadingChips = $derived(
+    framesStore.unsortedTotal > 0
+      ? [
+          { key: "all", label: "All" },
+          { key: "unsorted", label: "Unsorted" },
+        ]
+      : [{ key: "all", label: "All" }],
+  );
+
+  // If the user was sitting on the "Unsorted" filter and the last orphan
+  // frame just left (moved/deleted), the chip disappears — fall back to "All"
+  // so the grid isn't stranded on an empty, unselectable filter.
+  $effect(() => {
+    if (framesStore.unsortedTotal === 0 && viewStore.characterFilter === "unsorted") {
+      viewStore.characterFilter = "all";
+    }
+  });
 
   function selectCharacterFilter(key: string) {
     viewStore.characterFilter = key;
@@ -51,7 +67,6 @@
          filter strip rides next to ProjectPills and breaks together when
          the row gets tight. -->
     <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
-      <div class="w-5 h-5 rounded-full gradient-accent shadow-[0_0_12px_rgba(129,140,248,0.4)] flex-shrink-0"></div>
       <ProjectPills {onopenCreate} {onopenDelete} />
       {#if showCharacterFilter}
         <!-- Small left padding (pl-2) separates the filter chips from the
@@ -80,6 +95,31 @@
       <ActionBar {onopenRegex} />
       <ViewTabs />
       <DensitySlider />
+      <!-- Grid fit toggle, paired with the density slider. Off = thumbnails
+           crop to fill the tile (object-cover); on = whole image fits inside
+           with black bars (object-contain), never cropped. -->
+      <button
+        type="button"
+        onclick={() => (viewStore.fitContain = !viewStore.fitContain)}
+        aria-label="Toggle image fit"
+        aria-pressed={viewStore.fitContain}
+        title={viewStore.fitContain
+          ? "Fit: whole image shown with black bars — click to crop-fill tiles"
+          : "Fill: thumbnails cropped to the tile — click to fit the whole image"}
+        class="w-7 h-7 inline-flex items-center justify-center rounded-full border transition-colors
+          {viewStore.fitContain
+            ? 'gradient-accent text-white border-white/10 shadow-[0_2px_8px_rgba(99,102,241,0.35)]'
+            : 'bg-ink-900 border-ink-700 text-slate-400 hover:bg-ink-800 hover:text-slate-200'}"
+      >
+        <svg
+          viewBox="0 0 24 24" class="w-4 h-4"
+          fill="none" stroke="currentColor" stroke-width="2"
+          stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"
+        >
+          <rect x="3" y="3" width="18" height="18" rx="2" />
+          <rect x="3" y="8.5" width="18" height="7" rx="1" fill="currentColor" stroke="none" opacity="0.55" />
+        </svg>
+      </button>
       <QueuePill />
     </div>
   </div>

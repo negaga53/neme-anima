@@ -18,6 +18,10 @@ class FramesStore {
   // Unfiltered count for the current source/kept_only view — used by the
   // top-bar count badge to render "X / total" when a tag query is active.
   totalInView = $state<number>(0);
+  // On-disk kept frames whose slug isn't a current character — drives whether
+  // the top bar shows the "Unsorted" chip. Refreshed on every list fetch so it
+  // stays in step with moves/deletes/uploads/crops that re-list the grid.
+  unsortedTotal = $state<number>(0);
   loading = $state(false);
   selection = new SelectionModel();
   selectionVersion = $state(0); // bump to force reactivity for selection changes
@@ -38,6 +42,15 @@ class FramesStore {
   //      or a stranded spinner.
   states = $state<Map<string, FrameState>>(new Map());
 
+  // Monotonic per-filename crop counter, kept SEPARATE from `states` because
+  // `refresh()` wipes `states` on every filter change — a crop cache-bust must
+  // survive that. Each `markCropped` bump appends `?v=N` to the grid's crop
+  // URL so re-cropping (which overwrites `<name>_crop.png` at the same URL)
+  // shows the new pixels instead of the browser's cached copy. Reset only when
+  // the active project changes (see `#lastSlug`).
+  cropVersions = $state<Map<string, number>>(new Map());
+  #lastSlug: string | null = null;
+
   /** Current state for a filename, or the zero state if none recorded yet. */
   #stateOf(filename: string): FrameState {
     return this.states.get(filename) ?? { retagged: 0, described: 0, processing: false };
@@ -48,10 +61,17 @@ class FramesStore {
     opts: { source?: string; query?: string; characterSlug?: string } = {},
   ) {
     this.loading = true;
+    // Crop cache-bust counters are per-project, not per-view — only clear them
+    // when the project itself changes so a filter switch doesn't drop a bump.
+    if (slug !== this.#lastSlug) {
+      this.cropVersions = new Map();
+      this.#lastSlug = slug;
+    }
     try {
       const page = await api.listFrames(slug, opts);
       this.items = page.items;
       this.totalInView = page.total;
+      this.unsortedTotal = page.unsorted_total ?? 0;
       // Drop the per-filename state map on refresh — a different filter or
       // project could reuse filenames coincidentally, and we never want a
       // stale bump or a stranded spinner to leak into a fresh view.
@@ -59,6 +79,18 @@ class FramesStore {
     } finally {
       this.loading = false;
     }
+  }
+
+  /** Bump a frame's crop counter so the grid re-fetches its crop derivative.
+   *  Per-key immutable mutation (like the `states` map) keeps the reactivity
+   *  scoped to the one tile whose crop changed. */
+  markCropped(filename: string) {
+    this.cropVersions.set(filename, (this.cropVersions.get(filename) ?? 0) + 1);
+  }
+
+  /** Monotonic crop counter for a filename (0 if never cropped this session). */
+  cropVersion(filename: string): number {
+    return this.cropVersions.get(filename) ?? 0;
   }
 
   /** Mark a frame as freshly described: flip its has_description and bump the
