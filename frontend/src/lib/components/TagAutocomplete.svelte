@@ -1,6 +1,7 @@
 <!-- frontend/src/lib/components/TagAutocomplete.svelte -->
 <script lang="ts">
   import { categoryColor, formatCount, type Suggestion } from "$lib/tagSearch";
+  import { computeAutocompletePosition } from "$lib/tagAutocompletePosition";
 
   type Props = {
     suggestions: Suggestion[];
@@ -13,29 +14,29 @@
   const { suggestions, activeIndex, anchor, onaccept, onhover }: Props = $props();
 
   // Position in a fixed layer off the anchor's rect so we escape the
-  // overflow-hidden grid-hover panel. Flip above the input if there's no room
-  // below. Recomputed whenever the suggestion set changes.
+  // overflow-hidden grid-hover panel. Clamps to the viewport (flip above + keep
+  // within the left/right edges); recomputed whenever the suggestion set
+  // changes. See `tagAutocompletePosition.ts` for the (tested) math.
   let top = $state(0);
   let left = $state(0);
   let width = $state(0);
-  let flipUp = $state(false);
+  let maxWidth = $state(0);
 
-  const ROW = 26; // px per row, for the flip-up height estimate
   $effect(() => {
     // Touch `suggestions` so this recomputes as the list grows/shrinks.
     const count = suggestions.length;
     const r = anchor.getBoundingClientRect();
-    const estHeight = Math.min(count, 10) * ROW + 8;
-    flipUp = r.bottom + estHeight > window.innerHeight && r.top > estHeight;
-    top = flipUp ? r.top - estHeight : r.bottom + 2;
-    left = r.left;
-    width = Math.max(r.width, 220);
+    const pos = computeAutocompletePosition(r, count, window.innerWidth, window.innerHeight);
+    top = pos.top;
+    left = pos.left;
+    width = pos.width;
+    maxWidth = pos.maxWidth;
   });
 </script>
 
 <ul
   role="listbox"
-  style="position:fixed; top:{top}px; left:{left}px; min-width:{width}px;"
+  style="position:fixed; top:{top}px; left:{left}px; min-width:{width}px; max-width:{maxWidth}px;"
   class="z-50 max-h-64 overflow-y-auto rounded-lg border border-ink-700 bg-ink-950/95 backdrop-blur-sm shadow-xl py-1 text-[11px]"
 >
   {#each suggestions as s, i (s.entry.name)}
