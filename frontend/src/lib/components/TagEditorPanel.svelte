@@ -19,8 +19,11 @@
     ondirty?: (dirty: boolean) => void;
     /** Close the whole modal (routed through the modal's discard guard). */
     onclose?: () => void;
+    /** Delete the current frame (parent confirms + removes; bypasses the
+     *  discard guard since the frame is being discarded anyway). */
+    ondelete?: () => void;
   };
-  const { filename, ondirty, onclose }: Props = $props();
+  const { filename, ondirty, onclose, ondelete }: Props = $props();
 
   const confirmFrameOverwrite = getFrameOverwriteConfirm();
 
@@ -244,6 +247,23 @@
     <div class="flex items-center gap-2">
       {#if savedFlash.active}
         <span class="text-[10px] text-emerald-400">Saved ✓</span>
+      {/if}
+      {#if ondelete}
+        <button
+          type="button"
+          onclick={ondelete}
+          aria-label="Delete image"
+          title="Delete image"
+          class="w-6 h-6 rounded text-slate-400 hover:text-rose-300 hover:bg-rose-950/40 flex items-center justify-center transition-colors"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+               stroke-linecap="round" stroke-linejoin="round" class="w-4 h-4" aria-hidden="true">
+            <path d="M3 6h18" />
+            <path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2" />
+            <path d="M19 6l-1 14a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1L5 6" />
+            <path d="M10 11v6M14 11v6" />
+          </svg>
+        </button>
       {/if}
       {#if onclose}
         <button

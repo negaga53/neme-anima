@@ -57,6 +57,32 @@
     previewIndex = next;
   }
 
+  async function deletePreviewFrame(filename: string) {
+    const slug = projectsStore.active?.slug;
+    if (!slug) return;
+    // Same confirm style as the bulk delete in ActionBar.
+    if (!confirm("Delete this frame? This removes it from the dataset.")) return;
+    const wasAt = framesStore.items.findIndex((i) => i.filename === filename);
+    try {
+      await api.deleteFrame(slug, filename);
+    } catch (e) {
+      console.error("delete failed", e);
+      toasts.error("Delete failed — see console for details.");
+      return;
+    }
+    framesStore.removeLocal([filename]);
+    // Re-point the modal: stay open on the frame that slid into this slot
+    // (curate-and-continue), step back when we deleted the last one, and close
+    // when nothing is left. `filenames`/the modal guard derive from the store,
+    // so they update with the splice automatically.
+    const remaining = framesStore.items.length;
+    if (remaining === 0) {
+      previewIndex = null;
+    } else {
+      previewIndex = Math.min(wasAt < 0 ? 0 : wasAt, remaining - 1);
+    }
+  }
+
   async function refreshFramesAfterCrop() {
     const slug = projectsStore.active?.slug;
     if (slug) {
@@ -224,6 +250,7 @@
     index={previewIndex}
     onnav={navPreview}
     onclose={() => (previewIndex = null)}
+    ondelete={deletePreviewFrame}
     oncropped={(filename) => {
       // Bump first (survives the refresh's states reset) so the grid tile
       // re-fetches the freshly-written crop derivative.

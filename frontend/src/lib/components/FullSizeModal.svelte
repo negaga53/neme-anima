@@ -21,8 +21,12 @@
     /** Fired after a crop saves, with the cropped original's filename so the
      *  grid can swap in / cache-bust the crop derivative. */
     oncropped: (filename: string) => void;
+    /** Delete the shown frame. Parent confirms, removes it server-side + from
+     *  the store, and re-points the index (advancing to the next frame, or
+     *  closing the modal when it was the last one). */
+    ondelete: (filename: string) => void;
   };
-  const { filenames, index, onnav, onclose, oncropped }: Props = $props();
+  const { filenames, index, onnav, onclose, oncropped, ondelete }: Props = $props();
 
   // ---- LoRA-friendly crop guardrails (kept in sync with the brief) ----
   // Anima's bucket range is [0.5, 2.0]; the model was largely trained at 512px,
@@ -295,6 +299,14 @@
     pendingExit = null;
   }
 
+  // Delete skips the discard guard on purpose — the frame (and thus any
+  // unsaved tag/description edits) is about to be thrown away, so prompting to
+  // save them would be nonsense. The parent owns the confirm + store update.
+  function requestDelete() {
+    if (!filename) return;
+    ondelete(filename);
+  }
+
   // ---------------- key handling ----------------
 
   function onKey(ev: KeyboardEvent) {
@@ -490,7 +502,12 @@
   <aside
     class="w-96 shrink-0 h-full bg-ink-900 border border-ink-700 rounded-lg flex flex-col gap-4 p-4 overflow-y-auto"
   >
-    <TagEditorPanel {filename} ondirty={(d) => (tagsDirty = d)} onclose={requestClose} />
+    <TagEditorPanel
+      {filename}
+      ondirty={(d) => (tagsDirty = d)}
+      onclose={requestClose}
+      ondelete={requestDelete}
+    />
     <DescriptionEditorPanel {filename} ondirty={(d) => (descDirty = d)} />
   </aside>
 </div>
