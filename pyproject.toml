@@ -1,6 +1,6 @@
 [project]
 name = "neme-anima"
-version = "1.2.0"
+version = "1.3.0"
 description = "Extract anime character training crops from video using reference images, for character-LoRA training"
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
