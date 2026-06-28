@@ -16,6 +16,17 @@ from PIL import Image
 from neme_anima.config import TagConfig
 
 
+def _norm_tag(s: str) -> str:
+    """Normalize a tag for blacklist matching: underscores->spaces, trimmed, lowercased.
+
+    Danbooru uses ``long_hair`` but our sidecars (and WD14 under
+    ``TagConfig.no_underline=True``) use ``long hair``. Matching the blacklist
+    underscore/space/case-insensitively keeps it aligned with what is actually
+    emitted — mirrors ``tag_vocabulary._norm`` without importing that module.
+    """
+    return s.replace("_", " ").strip().lower()
+
+
 @dataclass(frozen=True)
 class TagResult:
     rating: dict[str, float]
@@ -54,8 +65,14 @@ class Tagger:
         # often "char_name, general_tag, general_tag, ..." for character LoRAs).
         char_tags = [t for t, _ in sorted(character.items(), key=lambda kv: -kv[1])]
         general_tags = [t for t, _ in sorted(general.items(), key=lambda kv: -kv[1])]
-        excluded = set(self.cfg.exclude_tags)
-        all_tags = [t for t in (char_tags + general_tags) if t not in excluded]
+        # The blacklist is matched underscore/space/case-insensitively. Danbooru
+        # tags are conventionally underscore form (``simple_background``) and the
+        # Settings blacklist input accepts them verbatim, but WD14 emits the
+        # on-disk space form (``simple background``) under ``no_underline=True``.
+        # An exact-string exclusion silently ignored every multi-word blacklist
+        # entry; normalizing both sides makes either form the user types match.
+        excluded = {_norm_tag(t) for t in self.cfg.exclude_tags}
+        all_tags = [t for t in (char_tags + general_tags) if _norm_tag(t) not in excluded]
         return ", ".join(all_tags)
 
 

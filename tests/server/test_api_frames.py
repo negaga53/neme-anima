@@ -557,6 +557,41 @@ def test_tagger_applies_project_blacklist(app, project_with_frames: Project):
     assert "simple background" not in tags
 
 
+def test_tagger_blacklist_matches_underscore_form(app, project_with_frames: Project):
+    """Blacklist entries in danbooru underscore form must strip space-form tags.
+
+    Danbooru tags are conventionally written with underscores
+    (``simple_background``), and the blacklist input accepts them verbatim. But
+    WD14 emits the on-disk space form (``simple background``) because
+    ``TagConfig.no_underline=True``. An exact-match exclusion therefore silently
+    ignored every multi-word blacklist entry — the blacklist looked completely
+    inert because most blacklist-worthy tags are multi-word. The exclusion must
+    normalize underscores/case so either form the user types matches what WD14
+    produces.
+    """
+    from types import SimpleNamespace
+
+    from neme_anima.server.api.frames import _get_or_make_tagger
+
+    project_with_frames.thresholds_overrides = {
+        "tag": {"exclude_tags": ["Simple_Background", "looking_at_viewer"]}
+    }
+    tagger = _get_or_make_tagger(SimpleNamespace(app=app), project_with_frames)
+
+    text = tagger._compose_text(
+        general={
+            "1girl": 0.9,
+            "simple background": 0.8,
+            "looking at viewer": 0.7,
+        },
+        character={},
+    )
+    tags = [t for t in text.split(", ") if t]
+    assert "1girl" in tags
+    assert "simple background" not in tags
+    assert "looking at viewer" not in tags
+
+
 def test_tagger_honors_injected_tagger(app, project_with_frames: Project):
     """A test/preload-injected ``app.state._tagger`` is returned verbatim so the
     GPU-bypass seam other tests rely on keeps working."""
