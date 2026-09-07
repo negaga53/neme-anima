@@ -32,6 +32,7 @@ class LLMConfigBody(BaseModel):
     model: str | None = None
     prompt: str | None = None
     api_key: str | None = None
+    disable_thinking: bool | None = None
 
 
 class PatchProjectBody(BaseModel):
@@ -233,6 +234,8 @@ async def patch_project(
             project.llm.prompt = body.llm.prompt
         if body.llm.api_key is not None:
             project.llm.api_key = body.llm.api_key
+        if body.llm.disable_thinking is not None:
+            project.llm.disable_thinking = body.llm.disable_thinking
     project.save()
     request.app.state.registry.register(project)  # refresh name
     return _project_view(project)

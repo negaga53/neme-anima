@@ -131,12 +131,18 @@ class LLMConfig:
     ``api_key`` is empty by default — LMStudio doesn't require auth. Set it
     when targeting providers that gate ``/v1/models`` and ``/v1/chat/completions``
     behind a bearer token (OpenAI, OpenRouter, hosted vLLM, etc.).
+
+    ``disable_thinking`` asks a reasoning model to skip its thinking pass. Off
+    by default because it sends a non-universal request field: the knob is
+    server-specific and a strict server may reject the whole request, so it is
+    opt-in per project rather than something every endpoint pays for.
     """
     enabled: bool = False
     endpoint: str = "http://localhost:1234"
     model: str = ""
     prompt: str = ""  # empty = use llm.DEFAULT_PROMPT
     api_key: str = ""  # empty = no Authorization header (LMStudio default)
+    disable_thinking: bool = False
 
 
 @dataclass

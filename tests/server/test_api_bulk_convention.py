@@ -216,6 +216,7 @@ async def test_bulk_retag_llm_skips_ghost_frame(
         prompt,
         danbooru_tags,
         api_key=None,
+        disable_thinking=False,
     ):
         return "A described frame."
 

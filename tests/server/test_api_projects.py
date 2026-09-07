@@ -179,6 +179,7 @@ async def test_patch_llm_config_persists_and_returns_in_view(
         "model": "",
         "prompt": "",
         "api_key": "",
+        "disable_thinking": False,
     }
 
     # Patch only some fields — others stay untouched.

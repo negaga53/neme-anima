@@ -68,6 +68,10 @@ export interface LLMConfig {
   /** Bearer token for providers that gate /v1/* (OpenAI, OpenRouter, hosted
    *  vLLM, …). Empty for LMStudio and other unauthenticated local servers. */
   api_key: string;
+  /** Ask a reasoning model to skip its thinking pass (sends
+   *  `reasoning_effort: "none"`). Opt-in: the field isn't universal and a
+   *  strict server may reject the request. */
+  disable_thinking: boolean;
 }
 
 export interface ProjectView {

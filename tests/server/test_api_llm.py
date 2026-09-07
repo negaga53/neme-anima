@@ -92,3 +92,108 @@ async def test_discover_models_422_on_blank_endpoint(client):
         "/api/llm/discover-models", json={"endpoint": "   "},
     )
     assert resp.status_code == 422
+
+
+# --------------------------------------------------------------------------- #
+# describe_image response handling
+# --------------------------------------------------------------------------- #
+# Reasoning models split their thinking pass out into `reasoning_content` or
+# inline it in `content`, and either way it competes with the caption for the
+# token budget. These cover both shapes plus the truncation fallout.
+
+
+def _describe(monkeypatch, *, content, finish_reason="stop"):
+    """Run describe_image against a canned chat-completions payload."""
+    from neme_anima import llm
+
+    payload = {
+        "choices": [{"finish_reason": finish_reason,
+                     "message": {"content": content, "role": "assistant"}}]
+    }
+    monkeypatch.setattr(
+        llm.httpx, "post",
+        lambda *a, **k: _FakeResponse(200, payload),
+    )
+    return llm.describe_image(
+        endpoint="http://x", model="m", image_path=Path("/nonexistent.png"),
+    )
+
+
+@pytest.fixture(autouse=False)
+def _no_image_read(monkeypatch):
+    from neme_anima import llm
+    monkeypatch.setattr(llm, "_image_to_data_url", lambda *a, **k: "data:image/png;base64,x")
+
+
+def test_describe_strips_inline_think_block(monkeypatch, _no_image_read):
+    out = _describe(
+        monkeypatch,
+        content="<think>The tags say brown hair but I see none.</think>A girl in a red dress.",
+    )
+    assert out == "A girl in a red dress."
+
+
+def test_describe_strips_unclosed_think_block(monkeypatch, _no_image_read):
+    """A closing tag with no opening one still marks everything before it as
+    reasoning — some servers only emit the close."""
+    out = _describe(monkeypatch, content="Let me look carefully.</think>A cat.")
+    assert out == "A cat."
+
+
+def test_describe_rejects_reasoning_only_answer(monkeypatch, _no_image_read):
+    """Budget consumed mid-thought: there is no caption, so fail loudly rather
+    than writing an empty description to the sidecar."""
+    from neme_anima.llm import LLMUnavailable
+
+    with pytest.raises(LLMUnavailable, match="no description"):
+        _describe(monkeypatch, content="<think>Still thinking about the",
+                  finish_reason="length")
+
+
+def test_describe_rejects_empty_content(monkeypatch, _no_image_read):
+    from neme_anima.llm import LLMUnavailable
+
+    with pytest.raises(LLMUnavailable, match="no description"):
+        _describe(monkeypatch, content="", finish_reason="length")
+
+
+def test_describe_trims_truncated_tail_to_last_sentence(monkeypatch, _no_image_read):
+    out = _describe(
+        monkeypatch,
+        content="A girl in a red dress. She stands against a dark purple backg",
+        finish_reason="length",
+    )
+    assert out == "A girl in a red dress."
+
+
+def test_describe_keeps_fragment_when_no_sentence_completed(monkeypatch, _no_image_read):
+    """Nothing complete to fall back to — a partial caption still beats none."""
+    out = _describe(monkeypatch, content="A girl in a red dre", finish_reason="length")
+    assert out == "A girl in a red dre"
+
+
+def test_describe_collapses_multiline_to_one_line(monkeypatch, _no_image_read):
+    out = _describe(monkeypatch, content="A girl in a red dress.\n\nDark background.")
+    assert out == "A girl in a red dress. Dark background."
+
+
+def test_describe_omits_thinking_field_by_default(monkeypatch, _no_image_read):
+    """The suppression field is non-standard enough that a strict server 400s
+    on it, so it must never ride along unasked."""
+    from neme_anima import llm
+
+    sent: dict = {}
+
+    def fake_post(url, **kwargs):
+        sent.update(kwargs["json"])
+        return _FakeResponse(200, {"choices": [
+            {"finish_reason": "stop", "message": {"content": "A cat."}}]})
+
+    monkeypatch.setattr(llm.httpx, "post", fake_post)
+    llm.describe_image(endpoint="http://x", model="m", image_path=Path("/n.png"))
+    assert "reasoning_effort" not in sent
+
+    sent.clear()
+    llm.describe_image(endpoint="http://x", model="m", image_path=Path("/n.png"),
+                       disable_thinking=True)
+    assert sent["reasoning_effort"] == "none"

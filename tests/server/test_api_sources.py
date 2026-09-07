@@ -685,6 +685,7 @@ async def test_capture_frame_runs_llm_when_enabled(
 
     def fake_describe_image(
         *, endpoint, model, image_path, prompt, danbooru_tags, api_key=None,
+        disable_thinking=False,
     ):
         return "A test pattern frame."
 

@@ -198,6 +198,12 @@
   // in project.json (same trust boundary as the rest of the project config).
   let llmApiKey = $state<string>(projectsStore.active?.llm?.api_key ?? "");
   let llmApiKeyVisible = $state<boolean>(false);
+  // Reasoning models spend part of the token budget on a think pass before the
+  // caption. Opt-in because the request field that suppresses it isn't
+  // universal — a strict server can reject the whole call. See LLMConfig.
+  let llmDisableThinking = $state<boolean>(
+    projectsStore.active?.llm?.disable_thinking ?? false,
+  );
   // If the project hasn't customized the prompt, surface the default so the
   // user has something to edit rather than a blank textarea — they can save
   // it verbatim or customize.
@@ -218,6 +224,7 @@
     llmEndpoint = llm.endpoint || "http://localhost:1234";
     llmModel = llm.model || "";
     llmApiKey = llm.api_key || "";
+    llmDisableThinking = llm.disable_thinking ?? false;
     // Empty saved prompt = "use the default", so show the default text in
     // the editor instead of a blank box; non-empty = user-customized.
     llmPrompt = llm.prompt || DEFAULT_LLM_PROMPT;
@@ -294,6 +301,7 @@
           // for projects that never edited the prompt.
           prompt: llmPrompt === DEFAULT_LLM_PROMPT ? "" : llmPrompt,
           api_key: llmApiKey.trim(),
+          disable_thinking: llmDisableThinking,
         },
       });
       if (turningAutoDeleteOn && existingRejected > 0) {
@@ -539,6 +547,25 @@
           {/each}
         </select>
       {/if}
+    </label>
+
+    <label
+      class="flex items-start gap-3 cursor-pointer mb-3"
+      title="Sends reasoning_effort: none so a reasoning model skips its thinking pass. Off by default: not every server understands the field, and a strict one (or OpenAI, for a non-reasoning model) will reject the request outright. Turn it on if captions come back truncated or each frame is slow."
+    >
+      <input
+        type="checkbox"
+        bind:checked={llmDisableThinking}
+        class="mt-0.5 w-4 h-4 rounded bg-ink-950 border-ink-700 accent-accent-500"
+      />
+      <span class="flex-1">
+        <span class="block text-sm text-slate-200">Disable model thinking</span>
+        <span class="block text-xs text-slate-500 mt-0.5">
+          Skips the reasoning pass on models that have one, so the whole token
+          budget goes to the caption. Not supported by every server — if
+          describing starts failing, turn this back off.
+        </span>
+      </span>
     </label>
 
     <label

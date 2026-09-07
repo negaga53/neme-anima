@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 from pathlib import Path
 
 import httpx
@@ -33,6 +34,13 @@ DEFAULT_ENDPOINT = "http://localhost:1234"
 _MODELS_TIMEOUT = httpx.Timeout(connect=5.0, read=60.0, write=10.0, pool=10.0)
 _DESCRIBE_TIMEOUT = httpx.Timeout(connect=5.0, read=120.0, write=30.0, pool=10.0)
 
+# Reasoning models (Qwen3, DeepSeek-R1, …) burn output tokens on a thinking
+# pass before the answer, and that pass is billed against max_tokens. A budget
+# sized for "1-2 sentences" gets eaten whole, so the caption comes back cut
+# mid-word or empty. 800 leaves room for the think block; non-reasoning models
+# are unaffected — they still hit their stop token after ~60 tokens.
+_DESCRIBE_MAX_TOKENS = 800
+
 
 class LLMUnavailable(RuntimeError):
     """Raised when the configured endpoint can't be reached or returned an error."""
@@ -52,6 +60,19 @@ def _auth_headers(api_key: str | None) -> dict[str, str]:
     if api_key and api_key.strip():
         return {"Authorization": f"Bearer {api_key.strip()}"}
     return {}
+
+
+def _thinking_params(disable_thinking: bool) -> dict:
+    """Extra request fields that ask a reasoning model to skip its think pass.
+
+    There is no universal knob for this. ``reasoning_effort`` is the
+    OpenAI-standard spelling and the most widely honoured, so it is the one we
+    send; servers that don't know it ignore unknown fields, but a strict one
+    (or OpenAI itself, which rejects "none" for non-reasoning models) will
+    400. That risk is why this is opt-in per project — see
+    :class:`neme_anima.storage.project.LLMConfig`.
+    """
+    return {"reasoning_effort": "none"} if disable_thinking else {}
 
 
 def discover_models(endpoint: str, api_key: str | None = None) -> list[str]:
@@ -126,6 +147,7 @@ def describe_image(
     prompt: str = DEFAULT_PROMPT,
     danbooru_tags: str | None = None,
     api_key: str | None = None,
+    disable_thinking: bool = False,
 ) -> str:
     """Send the image to ``/v1/chat/completions`` and return the description text.
 
@@ -151,7 +173,8 @@ def describe_image(
             ],
         }],
         "temperature": 0.2,
-        "max_tokens": 200,
+        "max_tokens": _DESCRIBE_MAX_TOKENS,
+        **_thinking_params(disable_thinking),
     }
     try:
         resp = httpx.post(
@@ -169,17 +192,65 @@ def describe_image(
     except ValueError as exc:
         raise LLMUnavailable(f"non-JSON response from {url}: {exc}") from exc
     try:
-        text = data["choices"][0]["message"]["content"]
+        choice = data["choices"][0]
+        text = choice["message"]["content"]
     except (KeyError, IndexError, TypeError) as exc:
         raise LLMUnavailable(f"unexpected response shape from {url}: {data!r}") from exc
+    if text is None:
+        text = ""
     if not isinstance(text, str):
         raise LLMUnavailable(f"non-string content from {url}: {text!r}")
-    return _clean_description(text)
+    text = _clean_description(text)
+    if not text:
+        raise LLMUnavailable(
+            f"{url} returned no description — the model spent its whole "
+            f"{_DESCRIBE_MAX_TOKENS}-token budget on reasoning. Turn off "
+            "thinking for this model, or use a non-reasoning one."
+        )
+    if choice.get("finish_reason") == "length":
+        # The answer was cut mid-sentence. A half sentence is worse than a
+        # shorter one in a training caption, so drop the dangling fragment —
+        # but only when a complete sentence survives.
+        trimmed = _trim_to_last_sentence(text)
+        if trimmed:
+            text = trimmed
+    return text
+
+
+# Servers split the thinking pass one of two ways: a separate
+# ``reasoning_content`` field (which we simply ignore) or inlined into
+# ``content`` wrapped in tags — LMStudio, the default target, does the latter
+# with Qwen3-style GGUFs. Strip the inline form so it never lands in a caption.
+_THINK_CLOSE_RE = re.compile(r"</(?:think|thinking|reasoning)\s*>", re.IGNORECASE)
+_THINK_OPEN_RE = re.compile(r"<(?:think|thinking|reasoning)\s*>", re.IGNORECASE)
+
+
+def _strip_reasoning(text: str) -> str:
+    """Drop an inline think block, closed or not.
+
+    Everything up to the last closing tag is reasoning (this also catches
+    servers that emit the closing tag without an opening one). A leftover
+    opening tag means the budget ran out mid-thought, so nothing after it is
+    an answer.
+    """
+    closes = list(_THINK_CLOSE_RE.finditer(text))
+    if closes:
+        text = text[closes[-1].end():]
+    opened = _THINK_OPEN_RE.search(text)
+    if opened:
+        text = text[: opened.start()]
+    return text
+
+
+def _trim_to_last_sentence(text: str) -> str:
+    """Return ``text`` up to its last sentence terminator, or "" if none."""
+    end = max(text.rfind("."), text.rfind("!"), text.rfind("?"))
+    return text[: end + 1].strip() if end >= 0 else ""
 
 
 def _clean_description(text: str) -> str:
     """Collapse to a single line — LoRA caption sidecars are line-delimited."""
-    lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
+    lines = [ln.strip() for ln in _strip_reasoning(text).strip().splitlines() if ln.strip()]
     return " ".join(lines)
 
 
@@ -345,6 +416,7 @@ def review_tags(
     api_key: str | None = None,
     max_search_rounds: int = 1,
     max_image_dim: int = 640,
+    disable_thinking: bool = False,
 ) -> dict:
     """Run the vision + tool-calling tag review and return the model's verdict.
 
@@ -403,6 +475,7 @@ def review_tags(
             "model": model, "messages": messages,
             "tools": [_SEARCH_TOOL, _SUBMIT_TOOL],
             "temperature": 0.2, "max_tokens": 2000,
+            **_thinking_params(disable_thinking),
         }, api_key)
         msg = _message(data)
         tool_calls = msg.get("tool_calls") or []
@@ -444,6 +517,7 @@ def review_tags(
     data = _post_chat(url, {
         "model": model, "messages": messages,
         "temperature": 0.2, "max_tokens": 2000,
+        **_thinking_params(disable_thinking),
     }, api_key)
     parsed = _extract_json_object(_message(data).get("content") or "")
     if parsed is None:

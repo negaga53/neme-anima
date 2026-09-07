@@ -552,6 +552,7 @@ def _safe_describe(png: Path, project, danbooru_tags: str) -> str:
             prompt=project.llm.prompt or DEFAULT_PROMPT,
             danbooru_tags=danbooru_tags,
             api_key=project.llm.api_key or None,
+            disable_thinking=project.llm.disable_thinking,
         )
     except LLMUnavailable as exc:
         console.print(f"[yellow]llm describe failed for {png.name}: {exc}[/yellow]")

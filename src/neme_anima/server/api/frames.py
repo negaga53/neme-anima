@@ -466,6 +466,7 @@ async def bulk_retag_llm(body: BulkRetagBody, project: Project = Depends(deps.ge
     model = project.llm.model
     prompt = project.llm.prompt or DEFAULT_PROMPT
     api_key = project.llm.api_key or None
+    disable_thinking = project.llm.disable_thinking
 
     def _describe_one(filename: str) -> tuple[bool, str | None, str | None]:
         # Same retarget rule as the WD14 path: when a crop exists for an
@@ -479,7 +480,7 @@ async def bulk_retag_llm(body: BulkRetagBody, project: Project = Depends(deps.ge
             description = describe_image(
                 endpoint=endpoint, model=model, image_path=png,
                 prompt=prompt, danbooru_tags=danbooru or None,
-                api_key=api_key,
+                api_key=api_key, disable_thinking=disable_thinking,
             )
         except LLMUnavailable as exc:
             return False, str(exc), eff
@@ -628,12 +629,14 @@ async def review_frame_tags(
     endpoint = project.llm.endpoint
     model = project.llm.model
     api_key = project.llm.api_key or None
+    disable_thinking = project.llm.disable_thinking
 
     def _run() -> dict:
         index = load_index(csv_path)
         raw = review_tags(
             endpoint=endpoint, model=model, image_path=png,
             existing_tags=existing, search_fn=index.search, api_key=api_key,
+            disable_thinking=disable_thinking,
         )
         return _reconcile_review(raw, existing, index)
 
@@ -924,6 +927,7 @@ async def ingest_kept_image(
                 prompt=project.llm.prompt or DEFAULT_PROMPT,
                 danbooru_tags=tag_text or None,
                 api_key=project.llm.api_key or None,
+                disable_thinking=project.llm.disable_thinking,
             )
 
         try:

@@ -632,6 +632,7 @@ async def test_bulk_retag_llm_prefers_crop_derivative(
 
     def fake_describe_image(
         *, endpoint, model, image_path, prompt, danbooru_tags, api_key=None,
+        disable_thinking=False,
     ):
         seen_image_paths.append(image_path)
         seen_danbooru.append(danbooru_tags)
@@ -694,6 +695,7 @@ async def test_bulk_retag_llm_resolves_crop_filename_to_original(
 
     def fake_describe_image(
         *, endpoint, model, image_path, prompt, danbooru_tags, api_key=None,
+        disable_thinking=False,
     ):
         captured.append(image_path)
         return "ok"
