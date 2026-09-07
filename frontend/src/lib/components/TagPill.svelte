@@ -1,6 +1,7 @@
 <script lang="ts">
   import { tagVocabulary } from "$lib/tagVocabulary.svelte";
   import { normalizeTagKey, type Suggestion } from "$lib/tagSearch";
+  import { parseTagsFromClipboard } from "$lib/tagClipboard";
   import TagAutocomplete from "./TagAutocomplete.svelte";
 
   type Props = {
@@ -202,7 +203,7 @@
     const pasted = ev.clipboardData?.getData("text") ?? "";
     if (!pasted.includes(",")) return;
     ev.preventDefault();
-    const parts = pasted.split(",").map((t) => t.trim()).filter(Boolean);
+    const parts = parseTagsFromClipboard(pasted);
     if (parts.length) {
       committed = true;
       onsplitpaste?.(parts);

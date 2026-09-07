@@ -11,6 +11,7 @@
   import { parseTags, splitSidecar } from "$lib/sidecar";
   import { tagsEqual } from "$lib/tagList";
   import { getFrameOverwriteConfirm } from "$lib/frameOverwriteContext";
+  import { writeSystemClipboard } from "$lib/tagClipboard";
   import TagList from "./TagList.svelte";
 
   type Props = {
@@ -82,6 +83,7 @@
   function copySelection() {
     if (selectedTags.length === 0 || copied) return;
     tagClipboard.set(selectedTags); // order-preserving; keeps selection intact
+    writeSystemClipboard(tagClipboard.text);
     copied = true;
   }
   function pasteClipboard() {

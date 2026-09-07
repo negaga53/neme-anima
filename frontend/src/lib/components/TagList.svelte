@@ -8,6 +8,7 @@
     type SimpleRect,
   } from "$lib/tagList";
   import { tagClipboard } from "$lib/stores/tagClipboard.svelte";
+  import { writeSystemClipboard } from "$lib/tagClipboard";
   import TagPill from "./TagPill.svelte";
 
   type Props = {
@@ -304,10 +305,14 @@
       selected = new Set();
     } else if (mod && k === "c") {
       e.preventDefault();
-      tagClipboard.set(sel.map((i) => tags[i]));
+      const copied = sel.map((i) => tags[i]);
+      tagClipboard.set(copied);
+      writeSystemClipboard(tagClipboard.text);
     } else if (mod && k === "x") {
       e.preventDefault();
-      tagClipboard.set(sel.map((i) => tags[i]));
+      const copied = sel.map((i) => tags[i]);
+      tagClipboard.set(copied);
+      writeSystemClipboard(tagClipboard.text);
       onchange(tags.filter((_, i) => !selSet.has(i)));
       selected = new Set();
     } else if (mod && k === "v") {
