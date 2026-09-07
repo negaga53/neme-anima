@@ -247,9 +247,15 @@
       const resp = await api.discoverLLMModels(llmEndpoint.trim(), llmApiKey.trim());
       llmModelsAvailable = resp.models;
       llmDiscoverOk = true;
-      // If the previously-saved model isn't in the new list, blank it so the
-      // user has to pick again — keeps the dropdown honest.
-      if (llmModel && !resp.models.includes(llmModel)) {
+      if (resp.models.length === 1) {
+        // Single-model server (common for self-hosted vLLM/ninfer boxes):
+        // there is nothing to choose between, so take it even when a stale
+        // model from a previous endpoint is still saved — otherwise the
+        // dropdown lands on blank and the user has to pick the only option.
+        llmModel = resp.models[0];
+      } else if (llmModel && !resp.models.includes(llmModel)) {
+        // If the previously-saved model isn't in the new list, blank it so the
+        // user has to pick again — keeps the dropdown honest.
         llmModel = "";
       } else if (!llmModel && resp.models.length > 0) {
         // First-time discovery convenience: preselect the first model.
