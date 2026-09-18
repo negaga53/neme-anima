@@ -136,6 +136,7 @@
   let llmModelSelected = $derived(!!projectsStore.active?.llm?.model);
 
   let retagBusy = $state(false);
+  let exportBusy = $state(false);
 
   function selectedItems(filenames: string[]): FrameRecord[] {
     const selected = new Set(filenames);
@@ -205,6 +206,27 @@
       await runBulkRetag("describe", slug, filenames, describeActions);
     } finally {
       retagBusy = false;
+    }
+  }
+
+  async function exportSelected() {
+    const slug = projectsStore.active?.slug;
+    if (!slug || exportBusy) return;
+    const filenames = framesStore.selectedFilenames();
+    if (filenames.length === 0) return;
+    exportBusy = true;
+    try {
+      const blob = await api.bulkExportFrames(slug, filenames);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${slug}-export.zip`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      toasts.error(`Export failed: ${e}`);
+    } finally {
+      exportBusy = false;
     }
   }
 
@@ -291,6 +313,13 @@
             class="bg-teal-500/30 hover:bg-teal-500/55 rounded-full px-2.5 h-5 transition-colors inline-flex items-center disabled:opacity-50 disabled:cursor-not-allowed"
           >Describe</button>
         {/if}
+        <button
+          type="button"
+          onclick={exportSelected}
+          disabled={exportBusy}
+          title="Download selected frames as a zip of image + caption pairs"
+          class="bg-sky-500/30 hover:bg-sky-500/55 rounded-full px-2.5 h-5 transition-colors inline-flex items-center disabled:opacity-50 disabled:cursor-not-allowed"
+        >Export</button>
         {#if multiCharacter}
           <!-- Single "Characters ▾" dropdown unifies move + also-assign.
                Inside, each row exposes both actions:

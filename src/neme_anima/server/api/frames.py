@@ -8,10 +8,11 @@ import json
 import logging
 import re
 import secrets
+import zipfile
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from neme_anima.server.api import deps
@@ -513,6 +514,35 @@ async def bulk_retag_llm(body: BulkRetagBody, project: Project = Depends(deps.ge
         # is the crop's filename so the frontend pops the right row.
         "effective_filenames": effective_filenames,
     }
+
+
+@router.post("/{slug}/frames/bulk-export")
+async def bulk_export(
+    body: BulkRetagBody, project: Project = Depends(deps.get_project),  # noqa: B008
+) -> StreamingResponse:
+    """Zip selected frames as kohya-style image/caption pairs for download.
+
+    Same image-resolution rule as the retag paths: the crop derivative when
+    one exists, else the original. Both files in a pair are written under the
+    effective (original) base name so a `_crop` filename never leaks into the
+    export. A missing sidecar becomes an empty ``.txt`` rather than being
+    skipped, so every image in the zip has a same-named caption file.
+    """
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for filename in body.filenames:
+            png, txt, eff = _resolve_tag_target(project, filename)
+            if not png.is_file():
+                continue
+            zf.write(png, arcname=f"{eff}.png")
+            text = txt.read_text(encoding="utf-8") if txt.is_file() else ""
+            zf.writestr(f"{eff}.txt", text)
+    buf.seek(0)
+    return StreamingResponse(
+        buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{project.slug}-export.zip"'},
+    )
 
 
 def _parse_tag_line(line: str) -> list[str]:

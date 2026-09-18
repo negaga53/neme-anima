@@ -437,6 +437,20 @@ export const bulkRetagLLM = (slug: string, filenames: string[]) =>
     { method: "POST", body: JSON.stringify({ filenames }) },
   );
 
+/** Zip selected frames (cropped image + sidecar, same base name) for download. */
+export const bulkExportFrames = async (slug: string, filenames: string[]): Promise<Blob> => {
+  const resp = await fetch(
+    `/api/projects/${encodeURIComponent(slug)}/frames/bulk-export`,
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ filenames }) },
+  );
+  if (!resp.ok) {
+    let detail: unknown = null;
+    try { detail = await resp.json(); } catch { /* body not JSON */ }
+    throw new ApiError(resp.status, detail);
+  }
+  return resp.blob();
+};
+
 /** Ask the LLM to review one frame's tags against its (cropped) image. */
 export const reviewTags = (slug: string, filename: string) =>
   request<TagReview>(

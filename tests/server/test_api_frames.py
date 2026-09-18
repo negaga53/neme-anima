@@ -356,6 +356,91 @@ async def test_bulk_delete(client, project_with_frames: Project):
     assert sorted(p.name for p in project_with_frames.kept_dir.iterdir()) == []
 
 
+async def test_bulk_export_zips_image_and_sidecar_pairs(
+    client, project_with_frames: Project,
+):
+    resp = await client.post(
+        f"/api/projects/{project_with_frames.slug}/frames/bulk-export",
+        json={"filenames": [
+            "ep01__s000_t001_f000010", "ep02__s000_t001_f000020",
+        ]},
+    )
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "application/zip"
+
+    import io
+    import zipfile
+
+    zf = zipfile.ZipFile(io.BytesIO(resp.content))
+    names = sorted(zf.namelist())
+    assert names == [
+        "ep01__s000_t001_f000010.png", "ep01__s000_t001_f000010.txt",
+        "ep02__s000_t001_f000020.png", "ep02__s000_t001_f000020.txt",
+    ]
+    assert zf.read("ep01__s000_t001_f000010.txt").decode() == "1girl, smile\n"
+
+
+async def test_bulk_export_prefers_crop_derivative_under_original_name(
+    client, project_with_frames: Project,
+):
+    """The zip must contain the crop's pixels but keep the original's base
+    name — matching the retag/review paths' image-resolution rule."""
+    name = "ep01__s000_t001_f000010"
+    crop = np.full((32, 32, 3), 77, dtype=np.uint8)
+    Image.fromarray(crop).save(project_with_frames.kept_dir / f"{name}_crop.png")
+
+    resp = await client.post(
+        f"/api/projects/{project_with_frames.slug}/frames/bulk-export",
+        json={"filenames": [name]},
+    )
+    assert resp.status_code == 200
+
+    import io
+    import zipfile
+
+    zf = zipfile.ZipFile(io.BytesIO(resp.content))
+    assert zf.namelist() == [f"{name}.png", f"{name}.txt"]
+    img = Image.open(io.BytesIO(zf.read(f"{name}.png")))
+    assert np.array(img).mean() > 50  # the crop's pixel value, not the original's
+
+
+async def test_bulk_export_missing_sidecar_becomes_empty_txt(
+    client, project_with_frames: Project,
+):
+    name = "ep01__s000_t001_f000010"
+    (project_with_frames.kept_dir / f"{name}.txt").unlink()
+
+    resp = await client.post(
+        f"/api/projects/{project_with_frames.slug}/frames/bulk-export",
+        json={"filenames": [name]},
+    )
+    assert resp.status_code == 200
+
+    import io
+    import zipfile
+
+    zf = zipfile.ZipFile(io.BytesIO(resp.content))
+    assert zf.read(f"{name}.txt") == b""
+
+
+async def test_bulk_export_skips_frames_missing_on_disk(
+    client, project_with_frames: Project,
+):
+    resp = await client.post(
+        f"/api/projects/{project_with_frames.slug}/frames/bulk-export",
+        json={"filenames": ["ep01__s000_t001_f000010", "does_not_exist"]},
+    )
+    assert resp.status_code == 200
+
+    import io
+    import zipfile
+
+    zf = zipfile.ZipFile(io.BytesIO(resp.content))
+    assert zf.namelist() == [
+        "ep01__s000_t001_f000010.png", "ep01__s000_t001_f000010.txt",
+    ]
+
+
 async def test_bulk_tags_replace_uses_regex(client, project_with_frames: Project):
     name = "ep01__s000_t001_f000010"
     # Write a known tag set first.
