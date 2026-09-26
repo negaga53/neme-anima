@@ -21,6 +21,7 @@ Events broadcast on the WebSocket:
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import os
@@ -37,6 +38,7 @@ from typing import Any
 
 from neme_anima import training as training_lib
 from neme_anima.server.events import Broadcaster, Event
+from neme_anima.server.sampling_runner import SampleScheduler, SpawnFn
 from neme_anima.storage.project import Project, TrainingConfig
 
 logger = logging.getLogger(__name__)
@@ -63,7 +65,8 @@ class RunState:
 
     project_slug: str
     run_dir: str
-    status: str  # "starting" | "running" | "stopping" | "stopped" | "finished" | "failed"
+    # "starting" | "running" | "sampling" | "stopping" | "stopped" | "finished" | "failed"
+    status: str
     started_at: str
     finished_at: str | None = None
     pid: int | None = None
@@ -85,6 +88,9 @@ class RunState:
     # bar without having to query the live config (which the user may have
     # edited mid-run).
     total_epochs: int | None = None
+    # Sample generation progress while a sampler job is queued/running:
+    # ``{"epoch": int | None, "pending": int}``; None when idle.
+    sampling: dict | None = None
 
 
 _PROGRESS_PATTERNS = [
@@ -116,8 +122,14 @@ def _parse_progress(line: str) -> dict[str, Any]:
 class TrainingManager:
     """Single-active-run training coordinator."""
 
-    def __init__(self, *, broadcaster: Broadcaster) -> None:
+    def __init__(
+        self,
+        *,
+        broadcaster: Broadcaster,
+        sampler_spawn: SpawnFn | None = None,
+    ) -> None:
         self._broadcaster = broadcaster
+        self._sampler_spawn = sampler_spawn
         self._lock = asyncio.Lock()
         # The active run, if any. Only one at a time.
         self._project: Project | None = None
@@ -131,6 +143,11 @@ class TrainingManager:
         # uses the correct ``keep_last_n_checkpoints`` even if the user edits
         # config mid-run.
         self._cfg_snapshot: TrainingConfig | None = None
+        # The active run's sample-image scheduler (see sampling_runner).
+        self._sampler: SampleScheduler | None = None
+        # True between trainer exit and final cleanup — sampling drain +
+        # pruning. The run still counts as active so nothing else grabs the GPU.
+        self._finalizing = False
 
     # ----- public API ------------------------------------------------------
 
@@ -228,7 +245,9 @@ class TrainingManager:
             argv = training_lib.build_launcher_argv(project.training, run_toml=run_toml)
             cwd = str(Path(project.training.diffusion_pipe_dir).expanduser().resolve())
 
-            self._cfg_snapshot = project.training
+            # Deep copy: the sampler reads it for the whole run, so mid-run
+            # config edits must not leak in.
+            self._cfg_snapshot = copy.deepcopy(project.training)
             self._project = project
             self._log_buffer.clear()
             self._log_path = run_dir / "run.log"
@@ -278,6 +297,18 @@ class TrainingManager:
                 asyncio.create_task(self._wait_for_exit()),
             ]
 
+            python = training_lib.diffusion_pipe_python(project.training.diffusion_pipe_dir)
+            self._sampler = SampleScheduler(
+                run_dir=run_dir,
+                cfg=self._cfg_snapshot,
+                python=str(python) if python else "python",
+                on_log=self._on_sample_log,
+                on_change=self._on_sample_change,
+                on_sampled=self._on_sampled,
+                spawn=self._sampler_spawn,
+            )
+            self._sampler.start()
+
             await self._broadcast_status()
             return self.status(project)
 
@@ -289,21 +320,30 @@ class TrainingManager:
                     "no active training run for this project",
                 )
             assert self._proc is not None and self._state is not None
+            # Local refs: _wait_for_exit may finish (and clear these) while we
+            # await below.
+            proc = self._proc
+            sampler = self._sampler
             self._state.stop_requested = True
             self._state.status = "stopping"
             _persist_state(project, self._state)
             await self._broadcast_status()
 
+            if sampler is not None:
+                await sampler.cancel()
+
             # Kill the whole process group — deepspeed spawns child processes.
-            try:
-                pgid = os.getpgid(self._proc.pid)
-                os.killpg(pgid, signal.SIGTERM)
-            except (ProcessLookupError, PermissionError):
-                # Already gone, or process-group lookup failed; fall back.
+            # Skipped when the trainer already exited (stop during the drain).
+            if proc.returncode is None:
                 try:
-                    self._proc.terminate()
-                except ProcessLookupError:
-                    pass
+                    pgid = os.getpgid(proc.pid)
+                    os.killpg(pgid, signal.SIGTERM)
+                except (ProcessLookupError, PermissionError):
+                    # Already gone, or process-group lookup failed; fall back.
+                    try:
+                        proc.terminate()
+                    except ProcessLookupError:
+                        pass
 
         # Outside the lock — wait for the wait task to mark things finished.
         await asyncio.sleep(0)  # let scheduler progress
@@ -326,6 +366,8 @@ class TrainingManager:
         user's Ctrl-C. The on-disk state already captures "running with
         pid=X" so the next startup can clean up.
         """
+        if self._sampler is not None:
+            await self._sampler.cancel()
         proc = self._proc
         if proc is None:
             return
@@ -350,7 +392,7 @@ class TrainingManager:
     # ----- internals -------------------------------------------------------
 
     def _is_active(self) -> bool:
-        return self._proc is not None and self._proc.returncode is None
+        return self._finalizing or (self._proc is not None and self._proc.returncode is None)
 
     async def _pump_stream(
         self,
@@ -368,49 +410,85 @@ class TrainingManager:
                     line = raw.decode("utf-8", errors="replace").rstrip("\n")
                 except Exception:
                     line = repr(raw)
-                ts = time.time()
-                rec = {"t": ts, "stream": kind, "line": line}
-                self._log_buffer.append(rec)
-                if self._log_file is not None:
-                    try:
-                        self._log_file.write(f"[{kind}] {line}\n")
-                    except Exception:
-                        pass
-                # Update progress fields opportunistically.
-                if self._state is not None:
-                    self._state.last_log_line = line
-                    parsed = _parse_progress(line)
-                    if parsed:
-                        if "epoch" in parsed:
-                            self._state.epoch = parsed["epoch"]
-                        if "step" in parsed:
-                            self._state.step = parsed["step"]
-                        if "loss" in parsed:
-                            self._state.loss = parsed["loss"]
-                        if self._project is not None:
-                            _persist_state(self._project, self._state)
-                # Push the line to subscribers.
-                await self._broadcaster.publish(Event(
-                    type="training.log",
-                    payload={
-                        "slug": self._state.project_slug if self._state else "",
-                        "stream": kind,
-                        "line": line,
-                        "t": ts,
-                    },
-                ))
+                await self._emit_log(line, kind)
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception("training log pump (%s) crashed", kind)
 
+    async def _emit_log(self, line: str, kind: str) -> None:
+        """Record one log line (buffer, run.log, WS). Only trainer output
+        feeds the epoch/step/loss parser — sampler lines ("sample") would
+        otherwise be misread as progress."""
+        ts = time.time()
+        self._log_buffer.append({"t": ts, "stream": kind, "line": line})
+        if self._log_file is not None:
+            try:
+                self._log_file.write(f"[{kind}] {line}\n")
+            except Exception:
+                pass
+        if self._state is not None:
+            if kind != "sample":
+                self._state.last_log_line = line
+                parsed = _parse_progress(line)
+                if parsed:
+                    if "epoch" in parsed:
+                        self._state.epoch = parsed["epoch"]
+                    if "step" in parsed:
+                        self._state.step = parsed["step"]
+                    if "loss" in parsed:
+                        self._state.loss = parsed["loss"]
+                    if self._project is not None:
+                        _persist_state(self._project, self._state)
+        await self._broadcaster.publish(Event(
+            type="training.log",
+            payload={
+                "slug": self._state.project_slug if self._state else "",
+                "stream": kind,
+                "line": line,
+                "t": ts,
+            },
+        ))
+
+    async def _on_sample_log(self, line: str) -> None:
+        await self._emit_log(line, "sample")
+
+    async def _on_sample_change(self) -> None:
+        if self._state is None or self._sampler is None:
+            return
+        s = self._sampler
+        self._state.sampling = (
+            {"epoch": s.current_epoch, "pending": s.pending}
+            if s.current_epoch is not None else None
+        )
+        if self._project is not None:
+            _persist_state(self._project, self._state)
+        await self._broadcast_status()
+
+    async def _on_sampled(self, epoch: int) -> None:
+        if self._state is None:
+            return
+        await self._broadcaster.publish(Event(
+            type="training.sample",
+            payload={
+                "slug": self._state.project_slug,
+                "run_name": Path(self._state.run_dir).name,
+                "epoch": epoch,
+            },
+        ))
+
     async def _wait_for_exit(self) -> None:
         proc = self._proc
         if proc is None:
             return
+        # Set while the trainer is still alive: once it exits, returncode is
+        # set before the pumps below finish draining, and the run must not
+        # look idle (start() could grab the GPU) during that window.
+        self._finalizing = True
         try:
             rc = await proc.wait()
         except asyncio.CancelledError:
+            self._finalizing = False
             raise
         finally:
             # Make sure both stream pumps drain even if wait() returned early.
@@ -425,6 +503,26 @@ class TrainingManager:
         project = self._project
         if state is not None:
             state.exit_code = rc
+        # Render samples for every LoRA not sampled yet — before pruning can
+        # delete one. A user Stop already cancelled the scheduler.
+        sampler = self._sampler
+        if sampler is not None and state is not None and not state.stop_requested:
+            if sampler.pending_epochs():
+                state.status = "sampling"
+                if project is not None:
+                    _persist_state(project, state)
+                await self._broadcast_status()
+            try:
+                await sampler.drain()
+            except asyncio.CancelledError:
+                # Our own cancellation leaves the scheduler's poll task
+                # running; kill it so no sampler outlives the manager.
+                await sampler.cancel()
+                raise
+            except Exception:
+                logger.exception("training: sample drain failed")
+        if state is not None:
+            state.sampling = None
             state.finished_at = datetime.now(UTC).isoformat()
             if state.stop_requested:
                 state.status = "stopped"
@@ -464,11 +562,13 @@ class TrainingManager:
             except Exception:
                 logger.exception("training: tag_run_safetensors failed")
 
+        self._finalizing = False
         await self._broadcast_status()
         self._close_log_file()
         self._proc = None
         self._project = None
         self._cfg_snapshot = None
+        self._sampler = None
         self._tasks = []
 
     def _close_log_file(self) -> None:
@@ -514,6 +614,7 @@ def _state_to_dict(state: RunState) -> dict:
         "resumed_from": state.resumed_from,
         "stop_requested": state.stop_requested,
         "total_epochs": state.total_epochs,
+        "sampling": state.sampling,
     }
 
 
@@ -552,6 +653,7 @@ def _load_persisted_state(project: Project) -> RunState | None:
             resumed_from=raw.get("resumed_from"),
             stop_requested=bool(raw.get("stop_requested", False)),
             total_epochs=raw.get("total_epochs"),
+            sampling=raw.get("sampling"),
         )
     except KeyError as exc:
         logger.warning(
