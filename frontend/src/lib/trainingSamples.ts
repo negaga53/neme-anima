@@ -32,7 +32,8 @@ export function buildSampleGrid(epochs: TrainingSampleEpoch[]): SampleGrid {
   };
 }
 
-/** Textarea → prompt list: one prompt per line, trimmed, blanks dropped. */
+/** Textarea → prompt list: one prompt per line, trimmed, blanks and
+ *  duplicates dropped (grid rows are keyed by prompt text). */
 export function parsePromptLines(text: string): string[] {
-  return text.split("\n").map((s) => s.trim()).filter(Boolean);
+  return [...new Set(text.split("\n").map((s) => s.trim()).filter(Boolean))];
 }

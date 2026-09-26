@@ -550,27 +550,21 @@ class TrainingManager:
             # Apply checkpoint retention now that the run is over, then tag
             # the remaining LoRA files with neme-anima provenance metadata.
             if state is not None and project is not None and self._cfg_snapshot is not None:
-                unsampled = sampler.pending_epochs() if sampler is not None else []
-                if unsampled:
-                    # Stop/shutdown interrupted sampling: pruning now could
-                    # delete a LoRA whose samples were never rendered.
-                    logger.info(
-                        "training: skipping checkpoint retention in %s — "
-                        "epochs %s not sampled yet", state.run_dir, unsampled,
+                try:
+                    # Stop/shutdown may interrupt sampling: never let
+                    # retention delete a LoRA whose samples weren't rendered.
+                    deleted = training_lib.prune_checkpoints(
+                        Path(state.run_dir),
+                        keep_last_n=self._cfg_snapshot.keep_last_n_checkpoints,
+                        protect=sampler.pending_epochs() if sampler is not None else (),
                     )
-                else:
-                    try:
-                        deleted = training_lib.prune_checkpoints(
-                            Path(state.run_dir),
-                            keep_last_n=self._cfg_snapshot.keep_last_n_checkpoints,
+                    if deleted:
+                        logger.info(
+                            "training: pruned %d checkpoints from %s: %s",
+                            len(deleted), state.run_dir, deleted,
                         )
-                        if deleted:
-                            logger.info(
-                                "training: pruned %d checkpoints from %s: %s",
-                                len(deleted), state.run_dir, deleted,
-                            )
-                    except Exception:
-                        logger.exception("training: prune_checkpoints failed")
+                except Exception:
+                    logger.exception("training: prune_checkpoints failed")
                 try:
                     tagged = training_lib.tag_run_safetensors(
                         project, Path(state.run_dir),

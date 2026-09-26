@@ -888,6 +888,17 @@ def test_prune_keeps_last_n(tmp_path: Path):
     assert remaining == ["epoch4", "epoch5"]
 
 
+def test_prune_spares_protected_epochs(tmp_path: Path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    for i in (1, 2, 3, 4, 5):
+        _make_ckpt(run_dir, f"epoch{i}")
+    deleted = training.prune_checkpoints(run_dir, keep_last_n=2, protect={2})
+    assert sorted(deleted) == ["epoch1", "epoch3"]
+    remaining = [c.name for c in training.discover_checkpoints(run_dir)]
+    assert remaining == ["epoch2", "epoch4", "epoch5"]
+
+
 def test_prune_no_op_when_under_limit(tmp_path: Path):
     run_dir = tmp_path / "run"
     run_dir.mkdir()

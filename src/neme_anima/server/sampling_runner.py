@@ -249,8 +249,13 @@ class SampleScheduler:
             error = "unreadable manifest.json"
         if error:
             await self._log(f"sampling epoch {epoch} failed: {error}")
-            return
-        await self._log(f"sampling epoch {epoch}: done in {time.time() - t0:.0f}s")
+        else:
+            await self._log(f"sampling epoch {epoch}: done in {time.time() - t0:.0f}s")
+        await self._sampled(epoch)
+
+    async def _sampled(self, epoch: int) -> None:
+        # Fired once an epoch's manifest exists — success or failure — so an
+        # open grid shows the new images or the error column right away.
         try:
             await self._on_sampled(epoch)
         except Exception:
@@ -261,3 +266,4 @@ class SampleScheduler:
         tmp = out_dir / "manifest.json.tmp"
         tmp.write_text(json.dumps({"epoch": epoch, "images": [], "error": error}, indent=2))
         tmp.replace(out_dir / "manifest.json")
+        await self._sampled(epoch)

@@ -1160,7 +1160,7 @@ def tag_run_safetensors(project: Project, run_dir: Path) -> list[str]:
 
 
 def prune_checkpoints(
-    run_dir: Path, *, keep_last_n: int,
+    run_dir: Path, *, keep_last_n: int, protect: Iterable[int] = (),
 ) -> list[str]:
     """Trim a finished run's checkpoints, treating the two artifact kinds
     separately.
@@ -1192,7 +1192,11 @@ def prune_checkpoints(
     if len(resume) > 1:
         to_delete.extend(resume[:-1])
     if keep_last_n > 0 and len(deliverables) > keep_last_n:
-        to_delete.extend(deliverables[: len(deliverables) - keep_last_n])
+        protected = set(protect)
+        to_delete.extend(
+            c for c in deliverables[: len(deliverables) - keep_last_n]
+            if c.epoch not in protected
+        )
 
     deleted: list[str] = []
     for cp in to_delete:
@@ -1242,8 +1246,9 @@ _SAMPLE_DIR_RE = re.compile(r"^epoch(\d+)$")
 
 
 def sample_prompts(config: TrainingConfig) -> list[str]:
-    """The non-blank sample prompts, stripped."""
-    return [p.strip() for p in config.sample_prompts if p.strip()]
+    """The non-blank sample prompts, stripped and de-duplicated (the sample
+    grid keys rows by prompt text)."""
+    return list(dict.fromkeys(p.strip() for p in config.sample_prompts if p.strip()))
 
 
 def sampling_enabled(config: TrainingConfig) -> bool:

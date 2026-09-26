@@ -121,7 +121,7 @@ async def test_crash_writes_error_manifest(tmp_path: Path):
         (training.sample_dir(h.run_dir, 10) / "manifest.json").read_text(),
     )
     assert "exited with code 3" in manifest["error"]
-    assert h.sampled == []
+    assert h.sampled == [10]  # the UI is told so it can show the error
     assert len(h.spawned) == 1  # not retried
 
 

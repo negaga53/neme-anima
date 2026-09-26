@@ -193,7 +193,11 @@
     if (rs.sampling) {
       const queued = Math.max(0, rs.sampling.pending - 1);
       const pct = rs.total_epochs ? Math.min(100, Math.round(((rs.epoch ?? 0) / rs.total_epochs) * 100)) : 0;
-      return { pct: rs.status === "sampling" ? 100 : pct, label: `sampling epoch ${rs.sampling.epoch}${queued ? ` (${queued} queued)` : ""}` };
+      const suffix = queued ? ` (${queued} queued)` : "";
+      return {
+        pct: rs.status === "sampling" ? 100 : pct,
+        label: `sampling epoch ${rs.sampling.epoch}${suffix}`,
+      };
     }
     const total = rs.total_epochs ?? 0;
     const cur = rs.epoch ?? 0;
@@ -527,7 +531,7 @@
                     {/if}
                     <TrainingSamplesGrid
                       runName={r.name}
-                      samplingEnabled={cfg.sample_prompts.some((p) => p.trim())}
+                      samplingEnabled={runState?.run_name === r.name && cfg.sample_prompts.some((p) => p.trim())}
                     />
                   </div>
                 {/if}

@@ -81,9 +81,9 @@ def test_sampling_disabled_when_prompts_blank():
     cfg = TrainingConfig(sample_prompts=["", "   "])
     assert training.sampling_enabled(cfg) is False
     assert training.sample_prompts(cfg) == []
-    cfg.sample_prompts = [" 1girl ", ""]
+    cfg.sample_prompts = [" 1girl ", "", "1girl", "2girls"]
     assert training.sampling_enabled(cfg) is True
-    assert training.sample_prompts(cfg) == ["1girl"]
+    assert training.sample_prompts(cfg) == ["1girl", "2girls"]  # de-duplicated
 
 
 def test_no_sample_problems_when_disabled(tmp_path: Path):

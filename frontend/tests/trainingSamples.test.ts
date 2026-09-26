@@ -31,4 +31,8 @@ describe("parsePromptLines", () => {
   it("trims and drops blanks", () => {
     expect(parsePromptLines(" a \n\n  \nb, c\n")).toEqual(["a", "b, c"]);
   });
+
+  it("drops duplicate prompts", () => {
+    expect(parsePromptLines("a\nb\n a ")).toEqual(["a", "b"]);
+  });
 });

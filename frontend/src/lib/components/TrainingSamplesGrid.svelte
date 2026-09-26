@@ -6,7 +6,8 @@
 
   type Props = {
     runName: string;
-    /** Whether sampling is configured — show the "none yet" hint only then. */
+    /** Show the "none yet" hint (the active run, with sampling configured);
+     *  otherwise a run without samples renders nothing. */
     samplingEnabled: boolean;
   };
   const { runName, samplingEnabled }: Props = $props();
