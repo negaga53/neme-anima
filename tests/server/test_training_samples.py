@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -33,20 +34,14 @@ def _fake_dp(tmp_path: Path, *, venv: bool = True, comfy: bool = True) -> Path:
 
 def _sampling_cfg(tmp_path: Path, **kw) -> TrainingConfig:
     dp = _fake_dp(tmp_path)
-    # Default launcher uses `deepspeed`, which isn't necessarily on the test
-    # host's PATH (see tests/test_training.py) — override so unrelated
-    # launcher-not-found problems don't leak into the "sampl" filter below.
-    cfg = TrainingConfig(
-        diffusion_pipe_dir=str(dp), sample_prompts=["1girl"],
-        launcher_override="/bin/sh -c true {config}",
-    )
+    cfg = TrainingConfig(diffusion_pipe_dir=str(dp), sample_prompts=["1girl"])
     for k, v in kw.items():
         setattr(cfg, k, v)
     return cfg
 
 
 def _sample_problems(cfg: TrainingConfig) -> list[str]:
-    return [p for p in training.validate_for_run(cfg) if "sampl" in p]
+    return training._sample_problems(cfg)
 
 
 def _make_ckpt(run_dir: Path, epoch: int, *, complete: bool = True,
@@ -128,6 +123,11 @@ def test_sample_validation_needs_vendored_comfyui(tmp_path: Path):
     assert any("ComfyUI" in p for p in _sample_problems(cfg))
 
 
+def test_validate_for_run_includes_sample_problems(tmp_path: Path):
+    cfg = _sampling_cfg(tmp_path, sample_steps=0)
+    assert "sample_steps must be > 0" in training.validate_for_run(cfg)
+
+
 def test_sample_epoch_qualifies():
     cfg = TrainingConfig(sample_every_n_epochs=10, epochs=25)
     assert [e for e in range(1, 26) if training.sample_epoch_qualifies(e, cfg)] == [10, 20, 25]
@@ -147,6 +147,23 @@ def test_sample_epochs_ready_filters(tmp_path: Path):
     ready = training.sample_epochs_ready(run_dir, cfg)
     assert [e for e, _ in ready] == [10, 40]
     assert ready[0][1].name == "adapter_model.safetensors"
+
+
+def test_sample_epochs_ready_newer_duplicate_supersedes(tmp_path: Path):
+    """A resume re-saving epoch 10 in a new sub-run dir: while the new copy is
+    still being written, the stale older copy must not be sampled."""
+    run_dir = tmp_path / "run"
+    cfg = TrainingConfig(sample_every_n_epochs=10, epochs=40)
+    old = _make_ckpt(run_dir, 10, subdir="a_old")
+    new = _make_ckpt(run_dir, 10, complete=False, subdir="b_new")
+    os.utime(old, (1, 1))
+    os.utime(new, (2, 2))
+    assert training.sample_epochs_ready(run_dir, cfg) == []
+    (new / "run.toml").write_text("")
+    os.utime(new, (2, 2))
+    assert training.sample_epochs_ready(run_dir, cfg) == [
+        (10, new / "adapter_model.safetensors"),
+    ]
 
 
 def test_discover_checkpoints_ignores_samples_dir(tmp_path: Path):
@@ -191,10 +208,18 @@ def test_read_sample_manifests(tmp_path: Path):
             "prompts": ["a"], "negative_prompt": "", "settings": {"steps": 30},
             "images": images, "error": err,
         }))
+    # Malformed manifests are skipped, not fatal.
+    bad = training.sample_dir(run_dir, 50)
+    bad.mkdir(parents=True)
+    (bad / "manifest.json").write_text("[1, 2]")
+    odd = training.sample_dir(run_dir, 60)
+    odd.mkdir(parents=True)
+    (odd / "manifest.json").write_text(json.dumps({"images": ["p00.png"]}))
     # An in-flight epoch (no manifest yet) is not listed.
     training.sample_dir(run_dir, 40).mkdir(parents=True)
     got = training.read_sample_manifests(run_dir)
-    assert [e["epoch"] for e in got] == [10, 20, 30]
+    assert [e["epoch"] for e in got] == [10, 20, 30, 60]
+    assert got[3]["images"] == []
     assert got[0]["dir"] == "epoch0010"
     assert [i["file"] for i in got[0]["images"]] == ["p00.png"]  # missing file dropped
     assert "mtime" in got[0]["images"][0]

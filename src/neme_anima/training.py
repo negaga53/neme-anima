@@ -1336,6 +1336,9 @@ def sample_epochs_ready(run_dir: Path, config: TrainingConfig) -> list[tuple[int
         if cp.epoch is None or not sample_epoch_qualifies(cp.epoch, config):
             continue
         ckpt = Path(cp.path)
+        # A newer duplicate supersedes an older one even while it's still
+        # being written — don't sample the stale LoRA in the meantime.
+        ready.pop(cp.epoch, None)
         adapter = ckpt / "adapter_model.safetensors"
         if not (adapter.is_file() and (ckpt / "run.toml").is_file()):
             continue
@@ -1350,7 +1353,9 @@ def build_sample_job(
 ) -> dict:
     """The JSON job ``_anima_sampler.py --job`` consumes."""
     def _p(raw: str) -> str:
-        return str(Path(raw).expanduser().resolve())
+        # Keep an empty path empty so the sampler fails loudly instead of
+        # loading from the resolved cwd.
+        return str(Path(raw).expanduser().resolve()) if raw else ""
 
     return {
         "diffusion_pipe_dir": _p(config.diffusion_pipe_dir),
@@ -1392,8 +1397,12 @@ def read_sample_manifests(run_dir: Path) -> list[dict]:
             data = json.loads(manifest.read_text())
         except (OSError, ValueError):
             continue
+        if not isinstance(data, dict):
+            continue
         images = []
         for img in data.get("images") or []:
+            if not isinstance(img, dict):
+                continue
             f = entry / str(img.get("file", ""))
             if img.get("file") and f.is_file():
                 images.append({
