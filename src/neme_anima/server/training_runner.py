@@ -15,7 +15,10 @@ Events broadcast on the WebSocket:
 * ``training.status`` — payload contains the full status snapshot. Sent on
   every state transition (start, stop, finish) plus periodically while
   training is running.
-* ``training.log`` — payload ``{slug, line, stream}`` for one log line.
+* ``training.log`` — payload ``{slug, line, stream}`` for one log line
+  (``stream`` is ``"sample"`` for sample-generator output).
+* ``training.sample`` — payload ``{slug, run_name, epoch}`` once an epoch's
+  sample images are written.
 """
 
 from __future__ import annotations
@@ -145,8 +148,8 @@ class TrainingManager:
         self._cfg_snapshot: TrainingConfig | None = None
         # The active run's sample-image scheduler (see sampling_runner).
         self._sampler: SampleScheduler | None = None
-        # True between trainer exit and final cleanup — sampling drain +
-        # pruning. The run still counts as active so nothing else grabs the GPU.
+        # True for the whole of _wait_for_exit (log drain, sampling drain,
+        # pruning). The run still counts as active so nothing else grabs the GPU.
         self._finalizing = False
 
     # ----- public API ------------------------------------------------------
@@ -347,16 +350,16 @@ class TrainingManager:
 
         # Outside the lock — wait for the wait task to mark things finished.
         await asyncio.sleep(0)  # let scheduler progress
-        if self._proc:
+        if proc.returncode is None:
             try:
-                await asyncio.wait_for(self._proc.wait(), timeout=10.0)
+                await asyncio.wait_for(proc.wait(), timeout=10.0)
             except TimeoutError:
                 # Force-kill if it didn't go down cleanly.
                 try:
-                    pgid = os.getpgid(self._proc.pid)
+                    pgid = os.getpgid(proc.pid)
                     os.killpg(pgid, signal.SIGKILL)
                 except (ProcessLookupError, PermissionError):
-                    self._proc.kill()
+                    proc.kill()
         return self.status(project)
 
     async def shutdown(self) -> None:
@@ -366,10 +369,15 @@ class TrainingManager:
         user's Ctrl-C. The on-disk state already captures "running with
         pid=X" so the next startup can clean up.
         """
+        if self._state is not None and self._is_active():
+            # An interrupted run (or sampling drain) must end "stopped", not
+            # "finished" — _wait_for_exit keys off this flag.
+            self._state.stop_requested = True
         if self._sampler is not None:
             await self._sampler.cancel()
         proc = self._proc
-        if proc is None:
+        if proc is None or proc.returncode is not None:
+            self._close_log_file()
             return
         try:
             pgid = os.getpgid(proc.pid)
@@ -501,75 +509,91 @@ class TrainingManager:
 
         state = self._state
         project = self._project
-        if state is not None:
-            state.exit_code = rc
-        # Render samples for every LoRA not sampled yet — before pruning can
-        # delete one. A user Stop already cancelled the scheduler.
         sampler = self._sampler
-        if sampler is not None and state is not None and not state.stop_requested:
-            if sampler.pending_epochs():
-                state.status = "sampling"
+        # Everything below runs under try/finally: an exception here must not
+        # leave _finalizing stuck True, or every future start() would be
+        # refused as "already active" until the server restarts.
+        try:
+            if state is not None:
+                state.exit_code = rc
+            # Render samples for every LoRA not sampled yet — before pruning
+            # can delete one. A user Stop already cancelled the scheduler.
+            if sampler is not None and state is not None and not state.stop_requested:
+                if sampler.pending_epochs():
+                    state.status = "sampling"
+                    if project is not None:
+                        _persist_state(project, state)
+                    await self._broadcast_status()
+                try:
+                    await sampler.drain()
+                except asyncio.CancelledError:
+                    # Our own cancellation leaves the scheduler's poll task
+                    # running; kill it so no sampler outlives the manager.
+                    await sampler.cancel()
+                    raise
+                except Exception:
+                    logger.exception("training: sample drain failed")
+            if state is not None:
+                state.sampling = None
+                state.finished_at = datetime.now(UTC).isoformat()
+                if state.stop_requested:
+                    state.status = "stopped"
+                elif rc == 0:
+                    state.status = "finished"
+                else:
+                    state.status = "failed"
+                    if not state.error:
+                        state.error = f"trainer exited with code {rc}"
                 if project is not None:
                     _persist_state(project, state)
+
+            # Apply checkpoint retention now that the run is over, then tag
+            # the remaining LoRA files with neme-anima provenance metadata.
+            if state is not None and project is not None and self._cfg_snapshot is not None:
+                unsampled = sampler.pending_epochs() if sampler is not None else []
+                if unsampled:
+                    # Stop/shutdown interrupted sampling: pruning now could
+                    # delete a LoRA whose samples were never rendered.
+                    logger.info(
+                        "training: skipping checkpoint retention in %s — "
+                        "epochs %s not sampled yet", state.run_dir, unsampled,
+                    )
+                else:
+                    try:
+                        deleted = training_lib.prune_checkpoints(
+                            Path(state.run_dir),
+                            keep_last_n=self._cfg_snapshot.keep_last_n_checkpoints,
+                        )
+                        if deleted:
+                            logger.info(
+                                "training: pruned %d checkpoints from %s: %s",
+                                len(deleted), state.run_dir, deleted,
+                            )
+                    except Exception:
+                        logger.exception("training: prune_checkpoints failed")
+                try:
+                    tagged = training_lib.tag_run_safetensors(
+                        project, Path(state.run_dir),
+                    )
+                    if tagged:
+                        logger.info(
+                            "training: tagged %d LoRA safetensors in %s",
+                            len(tagged), state.run_dir,
+                        )
+                except Exception:
+                    logger.exception("training: tag_run_safetensors failed")
+        finally:
+            self._finalizing = False
+            try:
                 await self._broadcast_status()
-            try:
-                await sampler.drain()
-            except asyncio.CancelledError:
-                # Our own cancellation leaves the scheduler's poll task
-                # running; kill it so no sampler outlives the manager.
-                await sampler.cancel()
-                raise
             except Exception:
-                logger.exception("training: sample drain failed")
-        if state is not None:
-            state.sampling = None
-            state.finished_at = datetime.now(UTC).isoformat()
-            if state.stop_requested:
-                state.status = "stopped"
-            elif rc == 0:
-                state.status = "finished"
-            else:
-                state.status = "failed"
-                if not state.error:
-                    state.error = f"trainer exited with code {rc}"
-            if project is not None:
-                _persist_state(project, state)
-
-        # Apply checkpoint retention now that the run is over, then tag the
-        # remaining LoRA files with neme-anima provenance metadata.
-        if state is not None and project is not None and self._cfg_snapshot is not None:
-            try:
-                deleted = training_lib.prune_checkpoints(
-                    Path(state.run_dir),
-                    keep_last_n=self._cfg_snapshot.keep_last_n_checkpoints,
-                )
-                if deleted:
-                    logger.info(
-                        "training: pruned %d checkpoints from %s: %s",
-                        len(deleted), state.run_dir, deleted,
-                    )
-            except Exception:
-                logger.exception("training: prune_checkpoints failed")
-            try:
-                tagged = training_lib.tag_run_safetensors(
-                    project, Path(state.run_dir),
-                )
-                if tagged:
-                    logger.info(
-                        "training: tagged %d LoRA safetensors in %s",
-                        len(tagged), state.run_dir,
-                    )
-            except Exception:
-                logger.exception("training: tag_run_safetensors failed")
-
-        self._finalizing = False
-        await self._broadcast_status()
-        self._close_log_file()
-        self._proc = None
-        self._project = None
-        self._cfg_snapshot = None
-        self._sampler = None
-        self._tasks = []
+                logger.exception("training: final status broadcast failed")
+            self._close_log_file()
+            self._proc = None
+            self._project = None
+            self._cfg_snapshot = None
+            self._sampler = None
+            self._tasks = []
 
     def _close_log_file(self) -> None:
         if self._log_file is not None:

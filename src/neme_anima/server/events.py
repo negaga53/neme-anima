@@ -25,6 +25,7 @@ class Event:
       - "job.done"         payload: { job_id, kept, rejected }      — job finished
       - "training.status"  payload: { slug, running, state }        — training run state changed
       - "training.log"     payload: { slug, stream, line, t }       — one trainer log line
+      - "training.sample"  payload: { slug, run_name, epoch }       — sample images written
     """
     type: str
     payload: dict[str, Any] = field(default_factory=dict)

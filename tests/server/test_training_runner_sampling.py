@@ -158,3 +158,47 @@ async def test_no_sampling_when_prompts_empty(tmp_path: Path, project: Project):
     await _wait_status(mgr, project, {"finished"})
     assert not (run_dir / "samples").exists()
     assert not any(e.type == "training.sample" for e in bc.events)
+
+
+async def test_finalize_error_does_not_leave_run_active(
+    tmp_path: Path, project: Project, monkeypatch,
+):
+    """An exception after the trainer exits (e.g. disk full while persisting
+    state) must not leave the manager stuck "active" forever."""
+    from neme_anima.server import training_runner
+
+    _pre_seed_checkpoints(project, "run1")
+    mgr = _manager(tmp_path, CollectingBroadcaster())
+    real_persist = training_runner._persist_state
+
+    def flaky_persist(p, state):
+        if state.status in ("finished", "failed"):
+            raise OSError("disk full")
+        real_persist(p, state)
+
+    monkeypatch.setattr(training_runner, "_persist_state", flaky_persist)
+    await mgr.start(project, run_dir_name="run1")
+    deadline = asyncio.get_running_loop().time() + 15
+    while mgr._is_active():
+        assert asyncio.get_running_loop().time() < deadline, "stuck active"
+        await asyncio.sleep(0.05)
+    assert mgr.active_slug is None
+
+
+async def test_shutdown_during_drain_stops_without_pruning(
+    tmp_path: Path, project: Project,
+):
+    run_dir = _pre_seed_checkpoints(project, "run1")
+    mgr = _manager(tmp_path, CollectingBroadcaster(), sleep=30)
+    await mgr.start(project, run_dir_name="run1")
+    deadline = asyncio.get_running_loop().time() + 10
+    while (mgr.status(project)["state"] or {}).get("status") != "sampling":
+        assert asyncio.get_running_loop().time() < deadline
+        await asyncio.sleep(0.05)
+    await asyncio.wait_for(mgr.shutdown(), timeout=15)
+    st = await _wait_status(mgr, project, {"stopped"})
+    assert st["status"] == "stopped"
+    # keep_last_n_checkpoints=1 would have deleted epochs 10/20 — unsampled,
+    # so retention is skipped.
+    names = [c.name for c in training.discover_checkpoints(run_dir)]
+    assert names == ["epoch10", "epoch20", "epoch30"]
