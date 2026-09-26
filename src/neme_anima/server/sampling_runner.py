@@ -109,7 +109,11 @@ class SampleScheduler:
         self._wake.set()
         await self._join_poll_task()
         if self.enabled and not self._cancelled:
-            await self._process_ready()
+            # Sampling must never fail the training run it belongs to.
+            try:
+                await self._process_ready()
+            except Exception:
+                logger.exception("sampling: drain failed")
 
     async def cancel(self) -> None:
         """Kill the running sampler and drop the queue."""
@@ -137,10 +141,27 @@ class SampleScheduler:
         if proc.returncode is not None:
             return
         try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            # The sampler leads its own group (start_new_session), so its pgid
+            # is its pid. Never getpgid(): with a spawn that didn't detach,
+            # that would be the server's own group.
+            os.killpg(proc.pid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError):
             with contextlib.suppress(ProcessLookupError):
                 proc.kill()
+
+    # Callbacks are best-effort: a failed broadcast or log write must not
+    # abort a job midway (which would orphan the sampler process).
+    async def _log(self, line: str) -> None:
+        try:
+            await self._on_log(line)
+        except Exception:
+            logger.exception("sampling: on_log failed")
+
+    async def _changed(self) -> None:
+        try:
+            await self._on_change()
+        except Exception:
+            logger.exception("sampling: on_change failed")
 
     async def _poll_loop(self) -> None:
         while not self._stopping:
@@ -165,7 +186,7 @@ class SampleScheduler:
                 if self.current_epoch is not None or self.pending:
                     self.current_epoch = None
                     self.pending = 0
-                    await self._on_change()
+                    await self._changed()
 
     async def _sample_one(self, epoch: int, adapter: Path) -> None:
         out_dir = training_lib.sample_dir(self._run_dir, epoch)
@@ -180,8 +201,8 @@ class SampleScheduler:
             "--job", str(job_path),
         ]
         self.current_epoch = epoch
-        await self._on_change()
-        await self._on_log(
+        await self._changed()
+        await self._log(
             f"sampling epoch {epoch}: {len(job['prompts'])} prompt(s), "
             f"{self.pending - 1} more queued",
         )
@@ -197,32 +218,46 @@ class SampleScheduler:
         if self._cancelled:
             # cancel() ran while spawn() was in flight, before _proc was set.
             self._kill(proc)
+        lost: str | None = None
         try:
             if proc.stdout is not None:
                 async for raw in proc.stdout:
-                    await self._on_log(raw.decode("utf-8", errors="replace").rstrip("\n"))
-            rc = await proc.wait()
+                    await self._log(raw.decode("utf-8", errors="replace").rstrip("\n"))
+            await proc.wait()
+        except Exception as e:  # e.g. an output line past the reader limit
+            logger.exception("sampling: lost sampler output for epoch %d", epoch)
+            lost = f"lost sampler output: {e}"
         finally:
+            # Whatever happened (error, caller cancelled), never leave a
+            # sampler running untracked on the GPU.
+            if proc.returncode is None:
+                self._kill(proc)
+                with contextlib.suppress(Exception):
+                    await proc.wait()
             self._proc = None
         if self._cancelled:
-            await self._on_log(f"sampling epoch {epoch}: cancelled")
+            await self._log(f"sampling epoch {epoch}: cancelled")
             return
         manifest = out_dir / "manifest.json"
         if not manifest.is_file():
-            await self._fail(out_dir, epoch, f"sampler exited with code {rc}")
+            await self._fail(out_dir, epoch, lost or f"sampler exited with code {proc.returncode}")
             return
         try:
-            error = json.loads(manifest.read_text()).get("error")
+            data = json.loads(manifest.read_text())
+            error = data.get("error") if isinstance(data, dict) else "malformed manifest.json"
         except (OSError, ValueError):
             error = "unreadable manifest.json"
         if error:
-            await self._on_log(f"sampling epoch {epoch} failed: {error}")
+            await self._log(f"sampling epoch {epoch} failed: {error}")
             return
-        await self._on_log(f"sampling epoch {epoch}: done in {time.time() - t0:.0f}s")
-        await self._on_sampled(epoch)
+        await self._log(f"sampling epoch {epoch}: done in {time.time() - t0:.0f}s")
+        try:
+            await self._on_sampled(epoch)
+        except Exception:
+            logger.exception("sampling: on_sampled failed")
 
     async def _fail(self, out_dir: Path, epoch: int, error: str) -> None:
-        await self._on_log(f"sampling epoch {epoch} failed: {error}")
+        await self._log(f"sampling epoch {epoch} failed: {error}")
         tmp = out_dir / "manifest.json.tmp"
         tmp.write_text(json.dumps({"epoch": epoch, "images": [], "error": error}, indent=2))
         tmp.replace(out_dir / "manifest.json")

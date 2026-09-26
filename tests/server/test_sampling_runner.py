@@ -186,3 +186,34 @@ async def test_pending_epochs(tmp_path: Path, defer: bool):
     h = Harness(tmp_path, sample_defer_to_end=defer)
     _make_ckpt(h.run_dir, 10)
     assert h.sched.pending_epochs() == [10]
+
+
+async def test_failing_callbacks_neither_orphan_nor_respawn(tmp_path: Path):
+    """A raising on_log/on_change (e.g. a broken WS broadcast) must not abort
+    the job midway — that used to orphan the sampler and re-spawn it on every
+    poll."""
+    h = Harness(tmp_path)
+
+    async def broken(*_a) -> None:
+        raise RuntimeError("broadcast down")
+
+    h.sched._on_log = broken
+    h.sched._on_change = broken
+    h.sched.start()
+    _make_ckpt(h.run_dir, 10)
+    await _wait_for(lambda: h.sampled == [10])
+    await asyncio.sleep(0.3)  # several more poll ticks
+    await h.sched.drain()
+    assert len(h.spawned) == 1
+
+
+async def test_drain_swallows_callback_errors(tmp_path: Path):
+    h = Harness(tmp_path)
+
+    async def boom(epoch: int) -> None:
+        raise RuntimeError("on_sampled down")
+
+    h.sched._on_sampled = boom
+    _make_ckpt(h.run_dir, 10)
+    await h.sched.drain()  # must not raise into the training manager
+    assert (training.sample_dir(h.run_dir, 10) / "manifest.json").is_file()
