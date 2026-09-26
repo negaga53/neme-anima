@@ -53,6 +53,9 @@ async def _default_spawn(argv: list[str], cwd: str) -> asyncio.subprocess.Proces
         stderr=asyncio.subprocess.STDOUT,
         # Own process group so cancel() can take down any children too.
         start_new_session=True,
+        # ComfyUI/tqdm can emit long carriage-return progress runs with no
+        # newline; the default 64 KiB line limit would abort the reader.
+        limit=4 * 1024 * 1024,
     )
 
 
