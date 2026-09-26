@@ -318,8 +318,8 @@ async def list_checkpoints(
     }
 
 
-_SAMPLE_DIR_RE = re.compile(r"^epoch\d+$")
-_SAMPLE_FILE_RE = re.compile(r"^p\d+\.png$")
+_SAMPLE_DIR_RE = re.compile(r"epoch\d+")
+_SAMPLE_FILE_RE = re.compile(r"p\d+\.png")
 
 
 def _run_dir_or_404(project: Project, run_name: str) -> Path:
@@ -353,7 +353,7 @@ async def get_sample_image(
     project: Project = Depends(deps.get_project),  # noqa: B008
 ) -> FileResponse:
     # Both components are pinned to known shapes, so no traversal is possible.
-    if not _SAMPLE_DIR_RE.match(sample_dir) or not _SAMPLE_FILE_RE.match(filename):
+    if not _SAMPLE_DIR_RE.fullmatch(sample_dir) or not _SAMPLE_FILE_RE.fullmatch(filename):
         raise HTTPException(status_code=400, detail="invalid sample path")
     run_dir = _run_dir_or_404(project, run_name)
     path = run_dir / training_lib.SAMPLES_DIRNAME / sample_dir / filename
