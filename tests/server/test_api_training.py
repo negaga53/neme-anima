@@ -303,3 +303,66 @@ async def test_resume_calls_start_with_latest_resumable_subdir(
     resp = await client.post(f"/api/projects/{project.slug}/training/resume")
     assert resp.status_code == 202
     assert calls == [(project.slug, sub.name, run_dir.name)]
+
+
+async def test_patch_sample_config_and_options(client, project: Project):
+    resp = await client.patch(
+        f"/api/projects/{project.slug}/training/config",
+        json={"sample_prompts": ["1girl, smile"], "sample_defer_to_end": True,
+              "sample_cfg": 5.0, "sample_sampler": "euler"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["config"]["sample_prompts"] == ["1girl, smile"]
+    assert body["config"]["sample_defer_to_end"] is True
+    assert "euler_ancestral" in body["sample_options"]["samplers"]
+    assert "simple" in body["sample_options"]["schedulers"]
+    reloaded = Project.load(project.root)
+    assert reloaded.training.sample_cfg == 5.0
+    assert reloaded.training.sample_sampler == "euler"
+
+
+def _seed_samples(project: Project, run_name: str = "r1") -> Path:
+    d = project.training_runs_dir / run_name / "samples" / "epoch0010"
+    d.mkdir(parents=True)
+    (d / "p00.png").write_bytes(b"\x89PNG fake")
+    (d / "manifest.json").write_text(json.dumps({
+        "prompts": ["1girl"], "negative_prompt": "", "settings": {"steps": 30},
+        "images": [{"file": "p00.png", "prompt": "1girl"}], "error": None,
+    }))
+    return d
+
+
+async def test_list_samples(client, project: Project):
+    _seed_samples(project)
+    resp = await client.get(f"/api/projects/{project.slug}/training/runs/r1/samples")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["run_name"] == "r1"
+    [ep] = body["epochs"]
+    assert ep["epoch"] == 10
+    url = ep["images"][0]["url"]
+    prefix = f"/api/projects/{project.slug}/training/runs/r1/samples/epoch0010/p00.png?t="
+    assert url.startswith(prefix)
+    img = await client.get(url)
+    assert img.status_code == 200
+    assert img.headers["content-type"] == "image/png"
+    assert img.content == b"\x89PNG fake"
+
+
+async def test_list_samples_unknown_run_404(client, project: Project):
+    resp = await client.get(f"/api/projects/{project.slug}/training/runs/nope/samples")
+    assert resp.status_code == 404
+
+
+@pytest.mark.parametrize(("sample_dir", "filename", "code"), [
+    ("epoch0010", "manifest.json", 400),
+    ("samples", "p00.png", 400),
+    ("epoch0010", "p09.png", 404),
+])
+async def test_sample_image_rejects(client, project: Project, sample_dir, filename, code):
+    _seed_samples(project)
+    resp = await client.get(
+        f"/api/projects/{project.slug}/training/runs/r1/samples/{sample_dir}/{filename}",
+    )
+    assert resp.status_code == code

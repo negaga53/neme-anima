@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 from dataclasses import asdict, fields
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse
@@ -75,6 +76,18 @@ class TrainingConfigBody(BaseModel):
 
     keep_last_n_checkpoints: int | None = None
 
+    sample_prompts: list[str] | None = None
+    sample_negative_prompt: str | None = None
+    sample_every_n_epochs: int | None = None
+    sample_defer_to_end: bool | None = None
+    sample_steps: int | None = None
+    sample_sampler: str | None = None
+    sample_scheduler: str | None = None
+    sample_cfg: float | None = None
+    sample_width: int | None = None
+    sample_height: int | None = None
+    sample_seed: int | None = None
+
 
 class CheckPathBody(BaseModel):
     path: str
@@ -108,6 +121,10 @@ def _config_with_path_checks(cfg: TrainingConfig) -> dict:
             )),
         },
         "problems": training_lib.validate_for_run(cfg),
+        "sample_options": {
+            "samplers": list(training_lib.SAMPLE_SAMPLERS),
+            "schedulers": list(training_lib.SAMPLE_SCHEDULERS),
+        },
     }
 
 
@@ -299,6 +316,50 @@ async def list_checkpoints(
         "run_dir": str(run_dir.resolve()),
         "checkpoints": [asdict(c) for c in cps],
     }
+
+
+_SAMPLE_DIR_RE = re.compile(r"^epoch\d+$")
+_SAMPLE_FILE_RE = re.compile(r"^p\d+\.png$")
+
+
+def _run_dir_or_404(project: Project, run_name: str) -> Path:
+    if run_name in (".", "..") or "/" in run_name:
+        raise HTTPException(status_code=400, detail="invalid run name")
+    run_dir = project.training_runs_dir / run_name
+    if not run_dir.is_dir():
+        raise HTTPException(status_code=404, detail=f"unknown run: {run_name}")
+    return run_dir
+
+
+@router.get("/{slug}/training/runs/{run_name}/samples")
+async def list_samples(
+    run_name: str, project: Project = Depends(deps.get_project),  # noqa: B008
+) -> dict:
+    run_dir = _run_dir_or_404(project, run_name)
+    base = (
+        f"/api/projects/{quote(project.slug)}/training/runs/"
+        f"{quote(run_name)}/samples"
+    )
+    epochs = training_lib.read_sample_manifests(run_dir)
+    for ep in epochs:
+        for img in ep["images"]:
+            img["url"] = f"{base}/{ep['dir']}/{img['file']}?t={img['mtime']}"
+    return {"run_name": run_name, "epochs": epochs}
+
+
+@router.get("/{slug}/training/runs/{run_name}/samples/{sample_dir}/{filename}")
+async def get_sample_image(
+    run_name: str, sample_dir: str, filename: str,
+    project: Project = Depends(deps.get_project),  # noqa: B008
+) -> FileResponse:
+    # Both components are pinned to known shapes, so no traversal is possible.
+    if not _SAMPLE_DIR_RE.match(sample_dir) or not _SAMPLE_FILE_RE.match(filename):
+        raise HTTPException(status_code=400, detail="invalid sample path")
+    run_dir = _run_dir_or_404(project, run_name)
+    path = run_dir / training_lib.SAMPLES_DIRNAME / sample_dir / filename
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="unknown sample image")
+    return FileResponse(path, media_type="image/png")
 
 
 @router.delete(
