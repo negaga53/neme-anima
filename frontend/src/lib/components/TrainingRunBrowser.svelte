@@ -4,6 +4,7 @@
   import { projectsStore } from "$lib/stores/projects.svelte";
   import { toasts } from "$lib/stores/toasts.svelte";
   import { trainingStore } from "$lib/stores/training.svelte";
+  import TrainingSamplesGrid from "./TrainingSamplesGrid.svelte";
   import type { TrainingConfig, TrainingRun, TrainingRunState } from "$lib/types";
 
   type Props = {
@@ -136,6 +137,14 @@
           border: "border-amber-800/60",
           label: "Starting…",
         };
+      case "sampling":
+        return {
+          tone: "sky",
+          pill: "bg-sky-900/50 text-sky-300 border border-sky-800",
+          bar: "bg-sky-500",
+          border: "border-sky-800/60",
+          label: "Sampling…",
+        };
       case "stopping":
         return {
           tone: "amber",
@@ -181,6 +190,11 @@
 
   // Compute (epoch%, label) for the current-run progress bar.
   function progressInfo(rs: NonNullable<typeof runState>): { pct: number; label: string } {
+    if (rs.sampling) {
+      const queued = Math.max(0, rs.sampling.pending - 1);
+      const pct = rs.total_epochs ? Math.min(100, Math.round(((rs.epoch ?? 0) / rs.total_epochs) * 100)) : 0;
+      return { pct: rs.status === "sampling" ? 100 : pct, label: `sampling epoch ${rs.sampling.epoch}${queued ? ` (${queued} queued)` : ""}` };
+    }
     const total = rs.total_epochs ?? 0;
     const cur = rs.epoch ?? 0;
     if (rs.status === "finished") return { pct: 100, label: total ? `${total} / ${total} epochs` : "completed" };
@@ -511,6 +525,10 @@
                         {/each}
                       </ul>
                     {/if}
+                    <TrainingSamplesGrid
+                      runName={r.name}
+                      samplingEnabled={cfg.sample_prompts.some((p) => p.trim())}
+                    />
                   </div>
                 {/if}
               </li>
