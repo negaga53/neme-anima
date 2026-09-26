@@ -4,7 +4,7 @@ import type {
   ProjectListEntry, ProjectView, QueueItem, Segment,
   TagReview, TagReviewItem, TrainingConfig, TrainingConfigResponse,
   TrainingStatus, TrainingRun, TrainingCheckpoint, TrainingDatasetPreview,
-  TrainingPathCheck, TrainingLogResponse, TrainingTomlPreview, WipePreview,
+  TrainingPathCheck, TrainingLogResponse, TrainingSamplesResponse, TrainingTomlPreview, WipePreview,
 } from "./types";
 
 /** Server-side sentinel for the Frames-tab "unsorted" filter. Mirrors the
@@ -607,6 +607,11 @@ export const deleteTrainingRun = (slug: string, runName: string) =>
   request<void>(
     `/api/projects/${encodeURIComponent(slug)}/training/runs/${encodeURIComponent(runName)}`,
     { method: "DELETE" },
+  );
+
+export const listTrainingSamples = (slug: string, runName: string) =>
+  request<TrainingSamplesResponse>(
+    `/api/projects/${encodeURIComponent(slug)}/training/runs/${encodeURIComponent(runName)}/samples`,
   );
 
 export const getTrainingDatasetPreview = (slug: string) =>

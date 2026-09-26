@@ -16,6 +16,8 @@ class TrainingStore {
   log = $state<TrainingLogLine[]>([]);
   loading = $state(false);
   error = $state<string | null>(null);
+  /** Bumped when new sample images land (or a run ends) so open sample grids refetch. */
+  samplesVersion = $state(0);
 
   // Slug we're currently subscribed to. The Training tab calls
   // ``setProject`` on mount and on project switch so we know which slug
@@ -63,6 +65,7 @@ class TrainingStore {
       const finalStatus = (ev.payload.state as { status?: string })?.status;
       if (finalStatus && (finalStatus === "finished" || finalStatus === "failed" || finalStatus === "stopped")) {
         this.refreshRuns();
+        this.samplesVersion++;
       }
     } else if (ev.type === "training.log") {
       const slug = ev.payload.slug as string | undefined;
@@ -79,6 +82,10 @@ class TrainingStore {
         : this.log.slice();
       next.push(line);
       this.log = next;
+    } else if (ev.type === "training.sample") {
+      const slug = ev.payload.slug as string | undefined;
+      if (!slug || slug !== this.slug) return;
+      this.samplesVersion++;
     }
   }
 

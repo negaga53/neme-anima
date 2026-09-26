@@ -184,7 +184,7 @@ export interface JobStages {
 }
 
 export interface ServerEvent {
-  type: EventType | "training.status" | "training.log";
+  type: EventType | "training.status" | "training.log" | "training.sample";
   payload: Record<string, unknown>;
 }
 
@@ -234,6 +234,18 @@ export interface TrainingConfig {
   trigger_token: string;
 
   keep_last_n_checkpoints: number;
+
+  sample_prompts: string[];
+  sample_negative_prompt: string;
+  sample_every_n_epochs: number;
+  sample_defer_to_end: boolean;
+  sample_steps: number;
+  sample_sampler: string;
+  sample_scheduler: string;
+  sample_cfg: number;
+  sample_width: number;
+  sample_height: number;
+  sample_seed: number;
 }
 
 export interface TrainingPathCheck {
@@ -253,6 +265,7 @@ export interface TrainingConfigResponse {
     llm_path: TrainingPathCheck;
   };
   problems: string[];
+  sample_options: { samplers: string[]; schedulers: string[] };
 }
 
 export interface TrainingRunState {
@@ -260,7 +273,7 @@ export interface TrainingRunState {
   run_dir: string;
   run_name: string;
   status:
-    | "starting" | "running" | "stopping" | "stopped" | "finished" | "failed";
+    | "starting" | "running" | "stopping" | "stopped" | "finished" | "failed" | "sampling";
   started_at: string;
   finished_at: string | null;
   pid: number | null;
@@ -273,6 +286,8 @@ export interface TrainingRunState {
   resumed_from: string | null;
   stop_requested: boolean;
   total_epochs: number | null;
+  /** Sampler progress while a sample job is queued/running. */
+  sampling: { epoch: number | null; pending: number } | null;
 }
 
 export interface TrainingLogLine {
@@ -339,6 +354,29 @@ export interface TrainingTomlPreview {
   dataset_toml: string;
   run_toml: string;
   launcher_argv: string[];
+}
+
+export interface TrainingSampleImage {
+  file: string;
+  prompt: string;
+  url: string;
+  mtime: number;
+}
+
+export interface TrainingSampleEpoch {
+  epoch: number;
+  /** On-disk folder, e.g. "epoch0010". */
+  dir: string;
+  prompts: string[];
+  negative_prompt: string;
+  settings: Record<string, unknown>;
+  images: TrainingSampleImage[];
+  error: string | null;
+}
+
+export interface TrainingSamplesResponse {
+  run_name: string;
+  epochs: TrainingSampleEpoch[];
 }
 
 export type ConvertMode = "remux" | "h264";
