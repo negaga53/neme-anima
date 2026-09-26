@@ -2,6 +2,7 @@
   import { onDestroy, untrack } from "svelte";
   import { trainingStore } from "$lib/stores/training.svelte";
   import type { TrainingConfig, TrainingPathCheck } from "$lib/types";
+  import TrainingSamplesPanel from "./TrainingSamplesPanel.svelte";
   import {
     PRESETS,
     LOW_VRAM_PROFILE,
@@ -591,6 +592,8 @@
           </div>
         </div>
       </div>
+
+      <TrainingSamplesPanel {cfg} />
 
       <!-- Retention -->
       <div class="bg-ink-900 border border-ink-700 rounded-xl p-4 mb-3">
