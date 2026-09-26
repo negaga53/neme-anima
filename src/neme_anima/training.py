@@ -238,6 +238,7 @@ def validate_for_run(config: TrainingConfig) -> list[str]:
             "Use 'bfloat16' — toggling the 'Fit in 8 GB' preset off and "
             "on resets this field."
         )
+    problems.extend(_sample_problems(config))
     return problems
 
 
@@ -900,8 +901,9 @@ def discover_checkpoints(run_dir: Path) -> list[CheckpointInfo]:
         ))
 
     # Skip directories we know aren't checkpoints (the staged training
-    # dataset; we'd just waste a sysstat scan walking it).
-    SKIP = {"dataset"}
+    # dataset, and the sample-image tree; we'd just waste a sysstat scan
+    # walking them).
+    SKIP = {"dataset", SAMPLES_DIRNAME}
     for entry in run_dir.iterdir():
         if not entry.is_dir() or entry.name in SKIP:
             continue
@@ -1218,6 +1220,198 @@ def _rmtree(path: Path) -> None:
         path.rmdir()
     except OSError:
         pass
+
+
+# ----- sample generation -----------------------------------------------------
+
+# Curated ComfyUI KSampler names offered in the UI. All run with the ComfyUI
+# vendored in diffusion-pipe's venv as-is; the SDE samplers are left out
+# because they need torchsde, which that venv lacks (see _anima_sampler.py).
+SAMPLE_SAMPLERS = (
+    "euler", "euler_ancestral", "heun", "dpm_2", "dpm_2_ancestral", "lms",
+    "dpmpp_2s_ancestral", "dpmpp_2m", "ddim", "uni_pc", "res_multistep",
+)
+SAMPLE_SCHEDULERS = (
+    "simple", "normal", "karras", "exponential", "sgm_uniform", "beta",
+    "ddim_uniform",
+)
+
+# Sample images live under ``<run_dir>/samples/epoch{N:04d}/``.
+SAMPLES_DIRNAME = "samples"
+_SAMPLE_DIR_RE = re.compile(r"^epoch(\d+)$")
+
+
+def sample_prompts(config: TrainingConfig) -> list[str]:
+    """The non-blank sample prompts, stripped."""
+    return [p.strip() for p in config.sample_prompts if p.strip()]
+
+
+def sampling_enabled(config: TrainingConfig) -> bool:
+    return bool(sample_prompts(config))
+
+
+def diffusion_pipe_python(diffusion_pipe_dir: str) -> Path | None:
+    """diffusion-pipe's venv interpreter (``.venv`` preferred), if present."""
+    if not diffusion_pipe_dir:
+        return None
+    dp = Path(diffusion_pipe_dir).expanduser()
+    for candidate in (dp / ".venv" / "bin" / "python", dp / "venv" / "bin" / "python"):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def sampler_script_path() -> Path:
+    """The standalone sampler run inside diffusion-pipe's venv."""
+    return Path(__file__).parent / "_anima_sampler.py"
+
+
+def _sample_problems(config: TrainingConfig) -> list[str]:
+    """Sample-generation settings that would block a run. None while
+    sampling is off, so a stale sampler setting never blocks training."""
+    if not sampling_enabled(config):
+        return []
+    problems: list[str] = []
+    every, save_every = config.sample_every_n_epochs, config.save_every_n_epochs
+    if every <= 0:
+        problems.append("sample_every_n_epochs must be > 0")
+    elif save_every > 0 and every % save_every != 0:
+        problems.append(
+            f"sample_every_n_epochs ({every}) must be a multiple of "
+            f"save_every_n_epochs ({save_every}) — samples are rendered from "
+            "saved epoch LoRAs",
+        )
+    if config.sample_steps <= 0:
+        problems.append("sample_steps must be > 0")
+    if config.sample_cfg < 0:
+        problems.append("sample_cfg must be >= 0")
+    for label, value in (("sample_width", config.sample_width),
+                         ("sample_height", config.sample_height)):
+        if value % 16 or not 256 <= value <= 2048:
+            problems.append(f"{label} must be a multiple of 16 between 256 and 2048")
+    if config.sample_sampler not in SAMPLE_SAMPLERS:
+        problems.append(f"unknown sample_sampler {config.sample_sampler!r}")
+    if config.sample_scheduler not in SAMPLE_SCHEDULERS:
+        problems.append(f"unknown sample_scheduler {config.sample_scheduler!r}")
+    if config.diffusion_pipe_dir:
+        dp = Path(config.diffusion_pipe_dir).expanduser()
+        if diffusion_pipe_python(config.diffusion_pipe_dir) is None:
+            problems.append(
+                f"sample generation needs diffusion-pipe's venv python at "
+                f"{dp / '.venv' / 'bin' / 'python'}",
+            )
+        if not (dp / "submodules" / "ComfyUI" / "comfy").is_dir():
+            problems.append(
+                f"sample generation needs diffusion-pipe's vendored ComfyUI at "
+                f"{dp / 'submodules' / 'ComfyUI'} (git submodule update --init)",
+            )
+    return problems
+
+
+def sample_epoch_qualifies(epoch: int, config: TrainingConfig) -> bool:
+    """Every ``sample_every_n_epochs``-th epoch, plus the final one
+    (diffusion-pipe always saves it)."""
+    every = config.sample_every_n_epochs
+    return epoch == config.epochs or (every > 0 and epoch % every == 0)
+
+
+def sample_dir(run_dir: Path, epoch: int) -> Path:
+    return Path(run_dir) / SAMPLES_DIRNAME / f"epoch{epoch:04d}"
+
+
+def sample_epochs_ready(run_dir: Path, config: TrainingConfig) -> list[tuple[int, Path]]:
+    """``(epoch, adapter path)`` for every saved epoch LoRA that should be
+    sampled and hasn't been yet, ascending.
+
+    A checkpoint counts as complete once ``run.toml`` sits next to the
+    adapter: diffusion-pipe copies it in only after the safetensors is fully
+    written (``utils/saver.py``). An existing ``manifest.json`` (written last
+    by the sampler, success or failure) marks an epoch done, so resumed runs
+    skip what was already sampled. When a resume leaves the same epoch in two
+    sub-run dirs, the newer one wins (``discover_checkpoints`` sorts by mtime
+    within an epoch).
+    """
+    ready: dict[int, Path] = {}
+    for cp in discover_checkpoints(run_dir):
+        if cp.epoch is None or not sample_epoch_qualifies(cp.epoch, config):
+            continue
+        ckpt = Path(cp.path)
+        adapter = ckpt / "adapter_model.safetensors"
+        if not (adapter.is_file() and (ckpt / "run.toml").is_file()):
+            continue
+        if (sample_dir(run_dir, cp.epoch) / "manifest.json").is_file():
+            continue
+        ready[cp.epoch] = adapter
+    return sorted(ready.items())
+
+
+def build_sample_job(
+    config: TrainingConfig, *, lora_path: Path, epoch: int, output_dir: Path,
+) -> dict:
+    """The JSON job ``_anima_sampler.py --job`` consumes."""
+    def _p(raw: str) -> str:
+        return str(Path(raw).expanduser().resolve())
+
+    return {
+        "diffusion_pipe_dir": _p(config.diffusion_pipe_dir),
+        "dit_path": _p(config.dit_path),
+        "vae_path": _p(config.vae_path),
+        "llm_path": _p(config.llm_path),
+        "lora_path": str(Path(lora_path).resolve()),
+        "epoch": epoch,
+        "checkpoint": Path(lora_path).parent.name,
+        "prompts": sample_prompts(config),
+        "negative_prompt": config.sample_negative_prompt.strip(),
+        "settings": {
+            "steps": config.sample_steps,
+            "sampler": config.sample_sampler,
+            "scheduler": config.sample_scheduler,
+            "cfg": config.sample_cfg,
+            "width": config.sample_width,
+            "height": config.sample_height,
+            "seed": config.sample_seed,
+        },
+        "output_dir": str(Path(output_dir).resolve()),
+    }
+
+
+def read_sample_manifests(run_dir: Path) -> list[dict]:
+    """Every finished sample epoch of a run (those with a manifest), by
+    epoch. Images whose file is missing are dropped; ``mtime`` rides along
+    so the API can cache-bust URLs."""
+    root = Path(run_dir) / SAMPLES_DIRNAME
+    if not root.is_dir():
+        return []
+    out: list[dict] = []
+    for entry in root.iterdir():
+        m = _SAMPLE_DIR_RE.match(entry.name)
+        manifest = entry / "manifest.json"
+        if not m or not manifest.is_file():
+            continue
+        try:
+            data = json.loads(manifest.read_text())
+        except (OSError, ValueError):
+            continue
+        images = []
+        for img in data.get("images") or []:
+            f = entry / str(img.get("file", ""))
+            if img.get("file") and f.is_file():
+                images.append({
+                    "file": img["file"],
+                    "prompt": img.get("prompt", ""),
+                    "mtime": int(f.stat().st_mtime),
+                })
+        out.append({
+            "epoch": int(m.group(1)),
+            "dir": entry.name,
+            "prompts": data.get("prompts") or [],
+            "negative_prompt": data.get("negative_prompt") or "",
+            "settings": data.get("settings") or {},
+            "images": images,
+            "error": data.get("error"),
+        })
+    out.sort(key=lambda e: e["epoch"])
+    return out
 
 
 # ----- run-folder helpers ----------------------------------------------------

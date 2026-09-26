@@ -238,6 +238,22 @@ class TrainingConfig:
     # is always trimmed to the latest, independent of this number.
     keep_last_n_checkpoints: int = 0
 
+    # Sample generation: preview images rendered from each qualifying epoch
+    # LoRA by ``_anima_sampler.py`` (vendored ComfyUI in diffusion-pipe's
+    # venv). Off while ``sample_prompts`` has no non-blank entry. Which
+    # epochs qualify: see ``training.sample_epoch_qualifies``.
+    sample_prompts: list[str] = field(default_factory=list)
+    sample_negative_prompt: str = ""
+    sample_every_n_epochs: int = 10
+    sample_defer_to_end: bool = False  # low-VRAM: sample after training exits
+    sample_steps: int = 30
+    sample_sampler: str = "euler_ancestral"
+    sample_scheduler: str = "simple"
+    sample_cfg: float = 4.5
+    sample_width: int = 1024
+    sample_height: int = 1024
+    sample_seed: int = 42  # fixed so epochs compare image-to-image
+
     def __post_init__(self) -> None:
         # Apply install-time prefill defaults for any path field the user
         # hasn't filled in. install_and_run.sh writes a JSON file at
