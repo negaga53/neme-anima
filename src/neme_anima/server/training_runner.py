@@ -56,6 +56,14 @@ LOG_BUFFER_MAX = 2000
 # future to_thread offload — and the lock documents the invariant.
 _STATE_LOCK = threading.Lock()
 
+# Stop asks the trainer to save DeepSpeed resume state and exit (diffusion-pipe's
+# ``save_quit`` signal file, honoured after the current step). If it hasn't
+# exited by then (stuck in model load / caching / a long eval), escalate to
+# SIGTERM. A second Stop click escalates immediately.
+GRACEFUL_STOP_TIMEOUT_S = 180.0
+# How often the live janitor trims superseded ``global_step`` snapshots.
+RESUME_JANITOR_INTERVAL_S = 60.0
+
 
 @dataclass
 class RunState:
@@ -151,6 +159,11 @@ class TrainingManager:
         # True for the whole of _wait_for_exit (log drain, sampling drain,
         # pruning). The run still counts as active so nothing else grabs the GPU.
         self._finalizing = False
+        # Trims superseded resume snapshots while the trainer runs.
+        self._janitor: asyncio.Task | None = None
+        self._janitor_done: asyncio.Event | None = None
+        # Pending SIGTERM fallback for a graceful (save_quit) Stop.
+        self._stop_escalation: asyncio.Task | None = None
 
     # ----- public API ------------------------------------------------------
 
@@ -212,6 +225,12 @@ class TrainingManager:
             if run_dir_name:
                 run_dir = project.training_runs_dir / run_dir_name
                 run_dir.mkdir(parents=True, exist_ok=True)
+                # A reused dir may hold an unconsumed ``save_quit`` (which
+                # would make the relaunch quit at its first step) or a torn
+                # ``<epoch>/tmp`` (which crashes it when that epoch re-saves).
+                cleared = training_lib.clear_stale_trainer_files(run_dir)
+                if cleared:
+                    logger.info("training: cleared stale trainer files: %s", cleared)
             else:
                 label = "resume" if resume_from_checkpoint else project.training.preset
                 run_dir = training_lib.new_run_dir(project, label=label)
@@ -294,6 +313,10 @@ class TrainingManager:
             _persist_state(project, self._state)
 
             # Spawn pump tasks.
+            self._janitor_done = asyncio.Event()
+            self._janitor = asyncio.create_task(
+                self._resume_janitor(run_dir, self._janitor_done),
+            )
             self._tasks = [
                 asyncio.create_task(self._pump_stream(self._proc.stdout, "stdout")),
                 asyncio.create_task(self._pump_stream(self._proc.stderr, "stderr")),
@@ -316,7 +339,15 @@ class TrainingManager:
             return self.status(project)
 
     async def stop(self, project: Project) -> dict:
-        """Signal the active run to terminate. Returns the new status."""
+        """Stop the active run. Returns the new status.
+
+        First click: if the trainer's sub-run-dir exists, drop diffusion-pipe's
+        ``save_quit`` signal so it writes DeepSpeed resume state after the
+        current step and exits — making Stop → Continue lossless — and return
+        at once (status ``stopping``) with a SIGTERM fallback scheduled after
+        ``GRACEFUL_STOP_TIMEOUT_S``. A second click (or no sub-run-dir yet)
+        terminates immediately.
+        """
         async with self._lock:
             if not self._is_active() or self._project is None or self._project.slug != project.slug:
                 raise RuntimeError(
@@ -327,40 +358,109 @@ class TrainingManager:
             # await below.
             proc = self._proc
             sampler = self._sampler
-            self._state.stop_requested = True
-            self._state.status = "stopping"
-            _persist_state(project, self._state)
+            state = self._state
+            already_stopping = state.stop_requested
+            state.stop_requested = True
+            state.status = "stopping"
+            _persist_state(project, state)
             await self._broadcast_status()
 
             if sampler is not None:
                 await sampler.cancel()
 
-            # Kill the whole process group — deepspeed spawns child processes.
-            # Skipped when the trainer already exited (stop during the drain).
-            if proc.returncode is None:
-                try:
-                    pgid = os.getpgid(proc.pid)
-                    os.killpg(pgid, signal.SIGTERM)
-                except (ProcessLookupError, PermissionError):
-                    # Already gone, or process-group lookup failed; fall back.
-                    try:
-                        proc.terminate()
-                    except ProcessLookupError:
-                        pass
+            graceful = (
+                proc.returncode is None
+                and not already_stopping
+                and self._request_save_quit(state)
+            )
 
         # Outside the lock — wait for the wait task to mark things finished.
         await asyncio.sleep(0)  # let scheduler progress
+        # Skipped when the trainer already exited (stop during the drain).
         if proc.returncode is None:
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=10.0)
-            except TimeoutError:
-                # Force-kill if it didn't go down cleanly.
-                try:
-                    pgid = os.getpgid(proc.pid)
-                    os.killpg(pgid, signal.SIGKILL)
-                except (ProcessLookupError, PermissionError):
-                    proc.kill()
+            if graceful:
+                await self._emit_log(
+                    "[neme-anima] Stop: asking the trainer to save resume state "
+                    "after the current step, then exit (click Stop again to "
+                    "force-kill).",
+                    "stdout",
+                )
+                self._stop_escalation = asyncio.create_task(
+                    self._escalate_stop(proc, GRACEFUL_STOP_TIMEOUT_S),
+                )
+            else:
+                if self._stop_escalation is not None:
+                    self._stop_escalation.cancel()
+                    self._stop_escalation = None
+                await _terminate(proc)
         return self.status(project)
+
+    def _request_save_quit(self, state: RunState) -> bool:
+        """Drop ``save_quit`` into the live sub-run-dir. False when it doesn't
+        exist yet (trainer still loading) or can't be written."""
+        try:
+            started = datetime.fromisoformat(state.started_at)
+        except ValueError:
+            started = None
+        sub = training_lib.active_sub_run_dir(
+            Path(state.run_dir),
+            resumed_from=state.resumed_from,
+            started_after=started,
+        )
+        if sub is None:
+            return False
+        try:
+            (sub / training_lib.SAVE_QUIT_SIGNAL).touch()
+        except OSError:
+            logger.exception("training: could not write save_quit signal")
+            return False
+        return True
+
+    async def _escalate_stop(self, proc: asyncio.subprocess.Process, timeout: float) -> None:
+        """SIGTERM fallback for a graceful Stop the trainer didn't honour."""
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=timeout)
+            return
+        except TimeoutError:
+            pass
+        if proc.returncode is None:
+            logger.warning("training: trainer ignored save_quit for %.0fs; terminating", timeout)
+            await self._emit_log(
+                "[neme-anima] Trainer did not exit after the save request; terminating.",
+                "stderr",
+            )
+            await _terminate(proc)
+
+    async def _resume_janitor(self, run_dir: Path, done: asyncio.Event) -> None:
+        """Periodically trim superseded DeepSpeed snapshots while training."""
+        while True:
+            try:
+                await asyncio.wait_for(done.wait(), timeout=RESUME_JANITOR_INTERVAL_S)
+                return
+            except TimeoutError:
+                pass
+            try:
+                deleted = await asyncio.to_thread(
+                    training_lib.prune_stale_resume_state, run_dir,
+                )
+                if deleted:
+                    logger.info("training: trimmed stale resume state %s", deleted)
+            except Exception:
+                logger.exception("training: resume janitor failed")
+
+    async def _stop_janitor(self) -> None:
+        """Stop the janitor, letting an in-flight prune finish first so it never
+        races the end-of-run ``prune_checkpoints``."""
+        task, done = self._janitor, self._janitor_done
+        self._janitor = self._janitor_done = None
+        if task is None:
+            return
+        if done is not None:
+            done.set()
+        try:
+            await asyncio.wait_for(task, timeout=30.0)
+        except (TimeoutError, asyncio.CancelledError):
+            pass
 
     async def shutdown(self) -> None:
         """Best-effort: kill the active run on server shutdown.
@@ -375,6 +475,9 @@ class TrainingManager:
             self._state.stop_requested = True
         if self._sampler is not None:
             await self._sampler.cancel()
+        for task in (self._janitor, self._stop_escalation):
+            if task is not None:
+                task.cancel()
         proc = self._proc
         if proc is None or proc.returncode is not None:
             self._close_log_file()
@@ -497,6 +600,8 @@ class TrainingManager:
             rc = await proc.wait()
         except asyncio.CancelledError:
             self._finalizing = False
+            if self._janitor is not None:
+                self._janitor.cancel()
             raise
         finally:
             # Make sure both stream pumps drain even if wait() returned early.
@@ -514,6 +619,7 @@ class TrainingManager:
         # leave _finalizing stuck True, or every future start() would be
         # refused as "already active" until the server restarts.
         try:
+            await self._stop_janitor()
             if state is not None:
                 state.exit_code = rc
             # Render samples for every LoRA not sampled yet — before pruning
@@ -587,6 +693,7 @@ class TrainingManager:
             self._project = None
             self._cfg_snapshot = None
             self._sampler = None
+            self._stop_escalation = None
             self._tasks = []
 
     def _close_log_file(self) -> None:
@@ -678,3 +785,28 @@ def _load_persisted_state(project: Project) -> RunState | None:
             "training: persisted state at %s is missing required key %s", p, exc,
         )
         return None
+
+
+async def _terminate(proc: asyncio.subprocess.Process) -> None:
+    """SIGTERM the trainer's whole process group (deepspeed spawns children),
+    then SIGKILL if it isn't down within 10s."""
+    if proc.returncode is not None:
+        return
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        # Already gone, or process-group lookup failed; fall back.
+        try:
+            proc.terminate()
+        except ProcessLookupError:
+            pass
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=10.0)
+    except TimeoutError:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass

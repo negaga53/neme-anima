@@ -237,6 +237,10 @@ class TrainingConfig:
     # (the user-requested default). DeepSpeed resume state (global_step dirs)
     # is always trimmed to the latest, independent of this number.
     keep_last_n_checkpoints: int = 0
+    # Write DeepSpeed resume state every N minutes of training (0 = only when
+    # the run finishes or is stopped), so a crash loses at most N minutes.
+    # Only the newest snapshot is kept on disk while the run goes.
+    checkpoint_every_n_minutes: int = 30
 
     # Sample generation: preview images rendered from each qualifying epoch
     # LoRA by ``_anima_sampler.py`` (vendored ComfyUI in diffusion-pipe's

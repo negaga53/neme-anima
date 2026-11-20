@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import struct
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -1004,3 +1005,98 @@ def test_training_config_default_round_trip_keep_all(project: Project):
     reloaded = Project.load(project.root)
     # The user-requested default is 0 — keep all checkpoints.
     assert reloaded.training.keep_last_n_checkpoints == 0
+
+
+# ----- resume snapshots (periodic save, live trim, stale-file cleanup) -------
+
+
+def test_render_run_toml_emits_periodic_resume_checkpoint(project: Project, tmp_path: Path):
+    text = training.render_run_toml(
+        project, run_dir=tmp_path / "run", dataset_toml_path=tmp_path / "ds.toml",
+    )
+    assert project.training.checkpoint_every_n_minutes == 30
+    assert tomllib.loads(text)["checkpoint_every_n_minutes"] == 30
+
+
+def test_render_run_toml_omits_periodic_resume_checkpoint_when_zero(
+    project: Project, tmp_path: Path,
+):
+    project.training.checkpoint_every_n_minutes = 0
+    text = training.render_run_toml(
+        project, run_dir=tmp_path / "run", dataset_toml_path=tmp_path / "ds.toml",
+    )
+    assert "checkpoint_every_n_minutes" not in text
+
+
+def test_prune_keeps_snapshot_named_by_latest_over_torn_higher_step(tmp_path: Path):
+    """A crash mid-save leaves a higher-numbered global_step that ``latest``
+    never pointed at; keeping it would delete the only loadable snapshot."""
+    run_dir = tmp_path / "run"
+    sub = run_dir / "20260501_11-51-58"
+    for step in (100, 200, 300):
+        _make_ckpt(sub, f"global_step{step}")
+    (sub / "latest").write_text("global_step200")
+    deleted = training.prune_checkpoints(run_dir, keep_last_n=0)
+    assert sorted(deleted) == ["global_step100", "global_step300"]
+    assert [c.name for c in training.discover_checkpoints(run_dir)] == ["global_step200"]
+
+
+def test_prune_stale_resume_state_only_drops_older_than_latest(tmp_path: Path):
+    run_dir = tmp_path / "run"
+    sub = run_dir / "20260501_11-51-58"
+    for name in ("epoch10", "global_step100", "global_step200", "global_step300"):
+        _make_ckpt(sub, name)
+    (sub / "latest").write_text("global_step200")
+    # global_step300 may be a save in progress — must survive.
+    assert training.prune_stale_resume_state(run_dir) == ["global_step100"]
+    remaining = {c.name for c in training.discover_checkpoints(run_dir)}
+    assert remaining == {"epoch10", "global_step200", "global_step300"}
+
+
+def test_prune_stale_resume_state_noop_without_latest(tmp_path: Path):
+    run_dir = tmp_path / "run"
+    sub = run_dir / "20260501_11-51-58"
+    _make_ckpt(sub, "global_step100")
+    _make_ckpt(sub, "global_step200")
+    assert training.prune_stale_resume_state(run_dir) == []
+
+
+def test_clear_stale_trainer_files(tmp_path: Path):
+    run_dir = tmp_path / "run"
+    sub = run_dir / "20260501_11-51-58"
+    sub.mkdir(parents=True)
+    (sub / "save_quit").write_text("")
+    (sub / "save").write_text("")
+    good = _make_ckpt(sub, "epoch10")
+    (good / "tmp").mkdir()                 # torn re-save over a complete epoch
+    (sub / "epoch20" / "tmp").mkdir(parents=True)  # torn first save
+    (run_dir / "dataset" / "tmp").mkdir(parents=True)  # not ours to touch
+
+    removed = training.clear_stale_trainer_files(run_dir)
+
+    assert not (sub / "save_quit").exists() and not (sub / "save").exists()
+    assert not (good / "tmp").exists() and (good / "weights.safetensors").is_file()
+    assert not (sub / "epoch20").exists()
+    assert (run_dir / "dataset" / "tmp").is_dir()
+    assert "20260501_11-51-58/epoch20" in removed
+
+
+def test_active_sub_run_dir(tmp_path: Path):
+    from datetime import UTC, datetime
+
+    run_dir = tmp_path / "run"
+    for name in ("20260501_11-51-58", "20260502_09-00-00", "dataset", "samples"):
+        (run_dir / name).mkdir(parents=True)
+    assert training.active_sub_run_dir(run_dir).name == "20260502_09-00-00"
+    # Resumed launches reuse the named dir.
+    assert training.active_sub_run_dir(
+        run_dir, resumed_from="20260501_11-51-58",
+    ).name == "20260501_11-51-58"
+    assert training.active_sub_run_dir(run_dir, resumed_from="nope") is None
+    # A fresh launch that hasn't created its dir yet must not pick an old one.
+    later = datetime(2026, 5, 3, tzinfo=UTC)
+    assert training.active_sub_run_dir(run_dir, started_after=later) is None
+    earlier = datetime(2026, 5, 2, 8, 59, 59, 500000, tzinfo=UTC)
+    assert training.active_sub_run_dir(
+        run_dir, started_after=earlier,
+    ).name == "20260502_09-00-00"

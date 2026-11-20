@@ -617,4 +617,22 @@
             DeepSpeed resume state is always trimmed to the latest.
           </span>
         </label>
+        <label
+          class="block text-xs mt-3"
+          title="Write DeepSpeed resume state every N minutes so a crash, OOM or killed VM loses at most N minutes — Continue picks up from the newest snapshot. Only the newest snapshot (~0.5 GB) is kept on disk. 0 = only when a run finishes or is stopped."
+        >
+          <span class="flex items-center gap-1 text-[10px] uppercase tracking-wide text-slate-500">
+            <span>resume snapshot every N minutes (0 = off)</span>
+            <span aria-hidden="true" class="text-slate-600 cursor-help">ⓘ</span>
+          </span>
+          <input
+            type="number" min="0" step="1" value={cfg.checkpoint_every_n_minutes}
+            onchange={(e) => patchField("checkpoint_every_n_minutes", Number((e.target as HTMLInputElement).value))}
+            class="w-full mt-1 px-3 py-1.5 bg-ink-950 border border-ink-700 rounded font-mono max-w-[12rem]"
+          />
+          <span class="block text-[10px] text-slate-600 mt-1">
+            Stop always saves resume state first; this covers crashes. Only the
+            newest snapshot is kept.
+          </span>
+        </label>
       </div>

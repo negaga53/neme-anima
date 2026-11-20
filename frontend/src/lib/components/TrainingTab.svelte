@@ -19,6 +19,9 @@
   let runs = $derived(trainingStore.runs);
   let runState = $derived(status?.state ?? null);
   let isRunning = $derived(!!status?.running);
+  // A first Stop asks the trainer to save resume state and exit; while that's
+  // pending the button escalates to a force-kill.
+  let isStopping = $derived(isRunning && runState?.status === "stopping");
   let canStart = $derived(!isRunning && problems.length === 0 && !!cfg);
   // The first run that has a resumable DeepSpeed state. Used to enable
   // the global "Continue last run" affordance in the header.
@@ -87,7 +90,10 @@
           onclick={doStop}
           disabled={busy}
           class="px-4 py-1.5 text-xs rounded bg-red-700 hover:bg-red-600 text-white disabled:opacity-50"
-        >Stop</button>
+          title={isStopping
+            ? "The trainer is saving resume state before exiting. Click to kill it now (loses progress since the last snapshot)."
+            : "Save resume state after the current step, then stop. Continue picks up from there."}
+        >{isStopping ? "Force stop" : "Stop"}</button>
       {:else}
         <button
           type="button"

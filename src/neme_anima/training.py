@@ -628,6 +628,15 @@ def render_run_toml(
         "",
         # Checkpointing
         _toml_kv("save_every_n_epochs", cfg.save_every_n_epochs),
+        # Periodic DeepSpeed resume state. Without it diffusion-pipe only
+        # writes ``global_step{N}`` + ``latest`` when a run *finishes*, so a
+        # crash / OOM / killed WSL VM left nothing to resume from. Superseded
+        # snapshots are trimmed live (``prune_stale_resume_state``).
+        *(
+            [_toml_kv("checkpoint_every_n_minutes", cfg.checkpoint_every_n_minutes)]
+            if cfg.checkpoint_every_n_minutes > 0
+            else []
+        ),
         # ``activation_checkpointing`` accepts either ``true`` (PyTorch
         # native checkpoint, the recipe default) or the string ``"unsloth"``
         # (unsloth's variant, more aggressive memory savings — used by the
@@ -959,6 +968,149 @@ def find_resumable_subdir(run_dir: Path) -> str | None:
     return candidates[0][1]
 
 
+# diffusion-pipe "signal files" (utils/saver.py ``process_step``): dropping one
+# of these into the active sub-run-dir makes train.py write its DeepSpeed
+# resume state after the current step — and, for ``save_quit``, exit cleanly.
+SAVE_QUIT_SIGNAL = "save_quit"
+_TRAINER_SIGNAL_FILES = ("save", SAVE_QUIT_SIGNAL)
+
+
+def _sub_run_dirs(run_dir: Path) -> list[Path]:
+    """diffusion-pipe's per-launch timestamped dirs under ``run_dir``."""
+    run_dir = Path(run_dir)
+    if not run_dir.is_dir():
+        return []
+    skip = {"dataset", SAMPLES_DIRNAME}
+    out = []
+    for entry in run_dir.iterdir():
+        if (
+            entry.is_dir()
+            and entry.name not in skip
+            and _parse_checkpoint_name(entry.name) == (None, None)
+        ):
+            out.append(entry)
+    return out
+
+
+def _latest_resume_snapshot(sub_run_dir: Path) -> Path | None:
+    """The ``global_step{N}`` dir that ``<sub_run_dir>/latest`` names.
+
+    DeepSpeed writes ``latest`` only *after* a snapshot is fully on disk
+    (``engine.save_checkpoint`` commits the tag last), so this — not the
+    highest-numbered ``global_step`` dir, which may be a save torn by a
+    crash — is the snapshot a resume will load. None when absent/dangling.
+    """
+    try:
+        tag = (Path(sub_run_dir) / "latest").read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not tag or "/" in tag or tag in (".", ".."):
+        return None
+    target = Path(sub_run_dir) / tag
+    return target if target.is_dir() else None
+
+
+_SUB_RUN_DIR_FORMAT = "%Y%m%d_%H-%M-%S"  # train.py's per-launch dir name (UTC)
+
+
+def active_sub_run_dir(
+    run_dir: Path,
+    *,
+    resumed_from: str | None = None,
+    started_after: datetime | None = None,
+) -> Path | None:
+    """The sub-run-dir the live trainer is writing into, if it exists yet.
+
+    A resumed launch reuses ``resumed_from``. A fresh launch creates a new
+    ``%Y%m%d_%H-%M-%S`` (UTC) dir, so the newest one is the live one — but
+    only if it was created after ``started_after`` (the launch time): a
+    reused run dir also holds earlier launches' dirs, and train.py creates
+    its own only after loading the model. None when it doesn't exist yet.
+    """
+    if resumed_from:
+        sub = Path(run_dir) / resumed_from
+        return sub if sub.is_dir() else None
+    stamped: list[tuple[datetime, Path]] = []
+    for sub in _sub_run_dirs(run_dir):
+        try:
+            ts = datetime.strptime(sub.name, _SUB_RUN_DIR_FORMAT).replace(
+                tzinfo=timezone.utc,
+            )
+        except ValueError:
+            continue
+        stamped.append((ts, sub))
+    if not stamped:
+        return None
+    ts, sub = max(stamped, key=lambda t: t[0])
+    if started_after is not None and started_after.tzinfo is None:
+        started_after = started_after.replace(tzinfo=timezone.utc)
+    if started_after is not None and ts < started_after.replace(microsecond=0):
+        return None
+    return sub
+
+
+def prune_stale_resume_state(run_dir: Path) -> list[str]:
+    """Delete ``global_step{N}`` snapshots superseded by a newer committed one.
+
+    Safe to run *while training*: in each sub-run-dir only snapshots with a
+    lower step than the one ``latest`` names are removed. A higher-numbered
+    dir (a save in progress, or one torn by a crash) is left alone — the
+    end-of-run :func:`prune_checkpoints` settles those. Keeps periodic resume
+    snapshots (~0.5 GB each for a rank-32 Anima LoRA) from piling up.
+    """
+    deleted: list[str] = []
+    for sub in _sub_run_dirs(run_dir):
+        keep = _latest_resume_snapshot(sub)
+        if keep is None:
+            continue
+        keep_step = _parse_checkpoint_name(keep.name)[1]
+        if keep_step is None:
+            continue
+        for entry in sub.iterdir():
+            m = re.match(r"^global_step(\d+)$", entry.name)
+            if m and entry.is_dir() and int(m.group(1)) < keep_step:
+                _rmtree(entry)
+                if not entry.exists():
+                    deleted.append(entry.name)
+    return deleted
+
+
+def clear_stale_trainer_files(run_dir: Path) -> list[str]:
+    """Remove leftovers that would sabotage a relaunch into ``run_dir``.
+
+    - ``save`` / ``save_quit`` signal files a previous launch never consumed
+      (e.g. Stop escalated to SIGTERM before the trainer reached a step):
+      a resumed train.py would read one at its first step and quit at once.
+    - ``<checkpoint>/tmp`` dirs from a save torn by a crash: diffusion-pipe
+      does ``os.makedirs(<ckpt>/tmp, exist_ok=False)`` when it re-saves that
+      epoch, so a stale one crashes the resumed run. A checkpoint dir left
+      empty by the cleanup (the save never got further) is removed too.
+
+    Returns the relative paths removed, for logging.
+    """
+    run_dir = Path(run_dir)
+    removed: list[str] = []
+    for sub in _sub_run_dirs(run_dir):
+        for name in _TRAINER_SIGNAL_FILES:
+            sig = sub / name
+            if sig.is_file():
+                sig.unlink(missing_ok=True)
+                removed.append(str(sig.relative_to(run_dir)))
+        for ckpt in sub.iterdir():
+            if not ckpt.is_dir() or _parse_checkpoint_name(ckpt.name) == (None, None):
+                continue
+            tmp = ckpt / "tmp"
+            if tmp.is_dir():
+                _rmtree(tmp)
+                removed.append(str(tmp.relative_to(run_dir)))
+                try:
+                    ckpt.rmdir()  # only succeeds if the save left nothing else
+                    removed.append(str(ckpt.relative_to(run_dir)))
+                except OSError:
+                    pass
+    return removed
+
+
 def latest_checkpoint(run_dir: Path) -> CheckpointInfo | None:
     """Most recent checkpoint, or None if there are none."""
     cps = discover_checkpoints(run_dir)
@@ -1172,9 +1324,12 @@ def prune_checkpoints(
     heavy DeepSpeed optimizer + model state (the *resume* plumbing — ~4x the
     size of an adapter, and only the latest is ever resumed from).
 
-    - **Resume state** is always trimmed to the single latest checkpoint
-      (highest step). This happens regardless of ``keep_last_n`` — once a run
-      is over there is no value in older resume snapshots.
+    - **Resume state** is always trimmed to a single snapshot: the one the
+      resumable sub-run-dir's ``latest`` file names (falling back to the
+      highest step when no ``latest`` exists). Keying off ``latest`` matters
+      because a crash mid-save leaves a *higher-numbered* but torn
+      ``global_step`` dir. This happens regardless of ``keep_last_n`` — once
+      a run is over there is no value in older resume snapshots.
     - **Epoch deliverables** honour ``keep_last_n``: keep the most recent N,
       delete the rest. ``keep_last_n == 0`` keeps every epoch (the
       user-requested default).
@@ -1189,7 +1344,14 @@ def prune_checkpoints(
     resume = [c for c in cps if c.epoch is None]
 
     to_delete: list[CheckpointInfo] = []
-    if len(resume) > 1:
+    resumable = find_resumable_subdir(run_dir)
+    keep = (
+        _latest_resume_snapshot(Path(run_dir) / resumable) if resumable else None
+    )
+    if keep is not None:
+        keep_path = str(keep.resolve())
+        to_delete.extend(c for c in resume if c.path != keep_path)
+    elif len(resume) > 1:
         to_delete.extend(resume[:-1])
     if keep_last_n > 0 and len(deliverables) > keep_last_n:
         protected = set(protect)

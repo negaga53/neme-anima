@@ -75,6 +75,7 @@ class TrainingConfigBody(BaseModel):
     trigger_token: str | None = None
 
     keep_last_n_checkpoints: int | None = None
+    checkpoint_every_n_minutes: int | None = None
 
     sample_prompts: list[str] | None = None
     sample_negative_prompt: str | None = None

@@ -234,6 +234,7 @@ export interface TrainingConfig {
   trigger_token: string;
 
   keep_last_n_checkpoints: number;
+  checkpoint_every_n_minutes: number;
 
   sample_prompts: string[];
   sample_negative_prompt: string;
